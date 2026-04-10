@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-GridNode = tuple[int, int]
+GridNode = tuple[int, int] # 定义一个type，表示网格中的一个节点（x, y）
 
 
 @dataclass(frozen=True, slots=True)
