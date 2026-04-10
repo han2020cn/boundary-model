@@ -9,6 +9,7 @@ import networkx as nx
 
 from demand_generation import TripRequest
 
+DISTANCE_CACHE_KEY = "_boundary_model_shortest_path_lengths"
 GridNode = tuple[int, int]
 Scenario = dict[str, Any]
 
@@ -88,7 +89,19 @@ def manhattan_distance(
 ) -> int:
     if graph is None:
         return abs(a[0] - b[0]) + abs(a[1] - b[1])
-    return int(nx.shortest_path_length(graph, a, b, weight="weight"))
+
+    distance_cache = graph.graph.get(DISTANCE_CACHE_KEY)
+    if distance_cache is None:
+        distance_cache = {
+            source: dict(lengths)
+            for source, lengths in nx.all_pairs_dijkstra_path_length(
+                graph,
+                weight="weight",
+            )
+        }
+        graph.graph[DISTANCE_CACHE_KEY] = distance_cache
+
+    return int(distance_cache[a][b])
 
 
 def evaluate_mode_1( # 评估固定路线模式

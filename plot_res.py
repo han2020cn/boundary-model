@@ -4,10 +4,10 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from pathlib import Path
-from main import optimal_modes
+import main 
 
 # ===== 1. 读取 JSON 文件 =====
-json_path = optimal_modes()  
+json_path = main.main()  
 outpng = Path(json_path).with_suffix(".png")
 
 with open(json_path, "r", encoding="utf-8") as f:

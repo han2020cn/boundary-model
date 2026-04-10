@@ -89,31 +89,32 @@ def run_scenarios() -> pd.DataFrame:
     return pd.DataFrame(result_rows, columns=RESULT_COLUMNS)
 
 
-def export_results(results_frame: pd.DataFrame, output_dir: Path) -> tuple[Path, Path]:
+def export_results(results_frame: pd.DataFrame, output_dir: Path) ->  Path:
     #output_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = output_dir / "scenario_results.csv"
-    json_path = output_dir / "scenario_results.json"
-
-    results_frame.to_csv(csv_path, index=False)
+    #csv_path = output_dir / "scenario_results.csv"
+    #results_frame.to_csv(csv_path, index=False)
+    date = datetime.now().strftime("%Y%m%d_%H%M%S")
+    json_path = output_dir / f"scenario_results_{date}.json"
     json_records = json.loads(results_frame.to_json(orient="records"))
     with json_path.open("w", encoding="utf-8") as handle:
         json.dump(json_records, handle, ensure_ascii=False, indent=2)
 
-    return csv_path, json_path
+    return json_path
 
 
 def main() -> pd.DataFrame:
     results_frame = run_scenarios()
-    export_results(results_frame, Path.cwd())
-    return results_frame
+    output_dir  = Path("/home/han/from-codex/boundary-model/rs")
+    json_path = export_results(results_frame, output_dir)
+    return json_path
 
 '''
 选出每个 scenario 的 optimal
 '''
-def optimal_modes(): 
+def optimal_modes(json_path: Path):
     # 读取结果
-    df = pd.read_json("scenario_results.json")
-
+    df = pd.read_json(json_path)
+    
     # 只保留可行方案
     feasible_df = df[df["feasible"] == True].copy()
 
@@ -125,25 +126,20 @@ def optimal_modes():
     # 每个 scenario 取第一条 = optimal mode
     optimal_df = feasible_df.groupby("scenario_id", as_index=False).first()
     date = datetime.now().strftime("%Y%m%d_%H%M%S")
-    jsonpath = f"optimals_{date}.json"
-    optimal_df.to_json(jsonpath, orient="records", force_ascii=False, indent=2)
-    return str(jsonpath)
-
-'''
-plot_res.py 画图脚本，读取 scenario_results.json，画出不同 mode_id 在 hs-ht-lambda 空间的分布'''
-for i in range(5):
-    if __name__ == "__main__":
-        main()
-        optimal_modes()
+    jsonpath_opt = json_path.with_name(f"optimals_{date}.json")
+    optimal_df.to_json(jsonpath_opt, orient="records", force_ascii=False, indent=2)
+    return str(jsonpath_opt)
 
 
 
+#draw 3D scatter plot of optimal modes
 
+def draw_3d(json_path: Path):
     # ===== 1. 读取 JSON 文件 =====
-    json_path = optimal_modes()  
-    outpng = Path(json_path).with_suffix(".png")
+    jsonpath = optimal_modes(json_path)  
+    outpng = Path(jsonpath).with_suffix(".png")
 
-    with open(json_path, "r", encoding="utf-8") as f:
+    with open(jsonpath, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     # ===== 2. 为不同 mode_id 设置颜色 =====
@@ -171,38 +167,25 @@ for i in range(5):
 
     # ===== 3. 创建 3D 图 =====
 
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection="3d")
-
-    # 为了避免 legend 重复，只给每个 mode_id 添加一次标签
-    added_label = set()
-
-    for row in data:
-        x = row["ht"]
-        y = row["hs"]
-        z = row["lambda"]
-        mode_id = row["mode_id"]
-
-        dx, dy, dz = offsets.get(mode_id, (0, 0, 0))
-
-        label = mode_labels[mode_id] if mode_id not in added_label else None
-        if label is not None:
-            added_label.add(mode_id)
-
-        ax.scatter(
-            x + dx,
-            y + dy,
-            z + dz,
-            color=mode_colors.get(mode_id, "black"),
-            s=60,
-            alpha=0.85,
-            label=label
-        )
+    fig = plt.figure(figsize=(10, 8)) 
+    ax = fig.add_subplot(111, projection="3d") # 为了避免 legend 重复，只给每个 mode_id 添加一次标签 
+    added_label = set() 
+    for row in data: 
+        x = row["ht"] 
+        y = row["hs"] 
+        z = row["lambda"] 
+        mode_id = row["mode_id"] 
+        dx, dy, dz = offsets.get(mode_id, (0, 0, 0)) 
+        label = mode_labels[mode_id] if mode_id not in added_label else None 
+        if label is not None: 
+            added_label.add(mode_id) 
+        ax.scatter( x + dx, y + dy, z + dz, color=mode_colors.get(mode_id, "black"), s=60, alpha=0.85, label=label ) 
 
     # ===== 4. 坐标轴和标题 =====
-    ax.set_xlabel("ht")
-    ax.set_ylabel("hs")
-    ax.set_zlabel("lambda")
+    
+    ax.set_xlabel("ht") 
+    ax.set_ylabel("hs") 
+    ax.set_zlabel("lambda") 
     ax.set_title("3D Scatter Plot of Scenarios by Mode ID")
 
     # 设置刻度，更清楚
@@ -217,5 +200,12 @@ for i in range(5):
     plt.tight_layout()
 
     plt.savefig(outpng, dpi=600, bbox_inches="tight")
-    #plt.show()
+    plt.show()
     plt.close(fig)
+
+
+if __name__ == "__main__":
+    json_path = main()
+    print(f"JSON path: {json_path}")
+    optimal_modes(json_path)
+    draw_3d(json_path)
