@@ -1,30 +1,32 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Callable, Iterable
 import math
 
 import networkx as nx
 
 from demand_generation import TripRequest
 
+# parameters
 DISTANCE_CACHE_KEY = "_boundary_model_shortest_path_lengths"
 GridNode = tuple[int, int]
 Scenario = dict[str, Any]
+CandidateConstraint = Callable[[dict[str, Any]], str | None]
 
 FLEET_SIZE = 7
 VEHICLE_CAPACITY = 30
 HUB: GridNode = (4, 4)
 FIXED_STOPS: tuple[GridNode, ...] = (
-    (1, 1),
-    (1, 4),
+    (1, 5),
     (1, 7),
-    (4, 7),
-    (7, 7),
-    (7, 4),
-    (7, 1),
-    (4, 1),
+    (5, 7),
+    (9, 7),
+    (9, 5),
+    (9, 3),
+    (5, 3),
+    (1, 3),
 )
 MODE_NAMES = {
     1: "fixed_route",
@@ -75,8 +77,36 @@ class SpokeVehicle:
     spoke_name: str
     first_departure: int
 
+@dataclass
+class requets:
+    request_id: int
+    origin: GridNode
+    destination: GridNode
+    departure_time: int
+@dataclass(slots=True)
+class ModeAccumulator:
+    served_requests: int = 0
+    total_wait: float = 0.0
+    total_walk: float = 0.0
+    total_onboard: float = 0.0
+    total_travel_distance: float = 0.0
+    total_departures: int = 0
+    net_expenditure: float = 0.0
 
-def build_grid_graph(grid_size: int = 9) -> nx.Graph:
+
+@dataclass(slots=True)
+class DrtVehicleState:
+    current_time: int = 0
+    current_location: GridNode = HUB
+    pending_requests: list[TripRequest] = field(default_factory=list)
+    pending_evaluation: dict[str, Any] = field(default_factory=dict)
+    committed_wait: float = 0.0
+    committed_onboard: float = 0.0
+    committed_active_travel: float = 0.0
+    has_departed: bool = False
+
+
+def build_grid_graph(grid_size: int) -> nx.Graph:
     graph = nx.grid_2d_graph(grid_size, grid_size)
     nx.set_edge_attributes(graph, 1, "weight")
     return graph
@@ -102,6 +132,112 @@ def manhattan_distance(
         graph.graph[DISTANCE_CACHE_KEY] = distance_cache
 
     return int(distance_cache[a][b])
+
+
+def _init_mode_accumulator() -> ModeAccumulator:
+    return ModeAccumulator()
+
+
+def _calculate_net_expenditure( # 计算净支出 
+    total_travel_distance: float,
+    total_departures: int,
+    served_requests: int,
+) -> float:
+    return float(total_travel_distance * 1.5 + total_departures * 100 - served_requests)
+
+
+def _set_operator_metrics(
+    acc: ModeAccumulator,
+    total_travel_distance: float,
+    total_departures: int,
+) -> None:
+    acc.total_travel_distance = float(total_travel_distance)
+    acc.total_departures = int(total_departures)
+    acc.net_expenditure = _calculate_net_expenditure(
+        acc.total_travel_distance,
+        acc.total_departures,
+        acc.served_requests,
+    )
+
+
+def _is_strictly_below_benchmark(
+    candidate_expenditure: float,
+    benchmark_expenditure: float,
+) -> bool:
+    return candidate_expenditure < benchmark_expenditure - 1e-9
+
+
+def _loop_departure_count(completion_time: float, cycle_length: int) -> int:
+    if completion_time <= 0.0:
+        return 0
+    return int(math.ceil(completion_time / cycle_length))
+
+
+def _benchmark_guard(
+    mode_id: int,
+    requests: list[TripRequest],
+    scenario: Scenario,
+    benchmark_expenditure: float | None,
+) -> dict[str, Any] | None:
+    if benchmark_expenditure is not None:
+        return None
+
+    return _finalize_result(
+        mode_id=mode_id,
+        scenario=scenario,
+        total_requests=len(requests),
+        served_requests=0,
+        benchmark_expenditure=None,
+        net_expenditure=0.0,
+        total_wait=0.0,
+        total_walk=0.0,
+        total_onboard=0.0,
+        feasible=False,
+        feasibility_reason="benchmark_mode_infeasible",
+    )
+
+
+def _finalize_nonbaseline_mode(
+    mode_id: int,
+    scenario: Scenario,
+    requests: list[TripRequest],
+    benchmark_expenditure: float | None,
+    acc: ModeAccumulator,
+    feasible: bool,
+    feasibility_reason: str,
+) -> dict[str, Any]:
+    return _finalize_result(
+        mode_id=mode_id,
+        scenario=scenario,
+        total_requests=len(requests),
+        served_requests=acc.served_requests,
+        benchmark_expenditure=benchmark_expenditure,
+        net_expenditure=acc.net_expenditure,
+        total_wait=acc.total_wait,
+        total_walk=acc.total_walk,
+        total_onboard=acc.total_onboard,
+        feasible=feasible,
+        feasibility_reason=feasibility_reason,
+    )
+
+
+def _minimize_candidate(
+    candidates: Iterable[dict[str, Any]],
+    constraints: Iterable[CandidateConstraint],
+) -> tuple[dict[str, Any] | None, set[str]]:
+    failure_reasons: set[str] = set()
+    ordered_constraints = tuple(constraints)
+
+    for candidate in sorted(candidates, key=lambda item: item["ranking"]):
+        for constraint in ordered_constraints:
+            failure_reason = constraint(candidate)
+            if failure_reason is not None:
+                failure_reasons.add(failure_reason)
+                break
+        else:
+            return candidate, failure_reasons
+
+    return None, failure_reasons
 
 
 def evaluate_mode_1( # 评估固定路线模式
@@ -175,13 +311,22 @@ def evaluate_mode_1( # 评估固定路线模式
                         }
 
         if best_choice is None:
+            total_travel_distance = float(sum(vehicle_completion.values()))
+            total_departures = sum(
+                _loop_departure_count(completion_time, loop.route_length)
+                for completion_time in vehicle_completion.values()
+            )
             result = _finalize_result(
                 mode_id=1,
                 scenario=scenario,
                 total_requests=len(requests),
                 served_requests=served_requests,
                 benchmark_expenditure=None,
-                net_expenditure=sum(vehicle_completion.values()),
+                net_expenditure=_calculate_net_expenditure(
+                    total_travel_distance,
+                    total_departures,
+                    served_requests,
+                ),
                 total_wait=total_wait,
                 total_walk=total_walk,
                 total_onboard=total_onboard,
@@ -209,7 +354,16 @@ def evaluate_mode_1( # 评估固定路线模式
         total_walk += float(best_choice["walk_time"])
         total_onboard += float(best_choice["onboard_time"])
 
-    net_expenditure = sum(vehicle_completion.values())
+    total_travel_distance = float(sum(vehicle_completion.values()))
+    total_departures = sum(
+        _loop_departure_count(completion_time, loop.route_length)
+        for completion_time in vehicle_completion.values()
+    )
+    net_expenditure = _calculate_net_expenditure(
+        total_travel_distance,
+        total_departures,
+        served_requests,
+    )
     result = _finalize_result(
         mode_id=1,
         scenario=scenario,
@@ -233,35 +387,19 @@ def evaluate_mode_2( # 评估偏离路线模式 deviated route
     graph: nx.Graph,
     benchmark_expenditure: float | None,
 ) -> dict[str, Any]:
-    if benchmark_expenditure is None:
-        return _finalize_result(
-            mode_id=2,
-            scenario=scenario,
-            total_requests=len(requests),
-            served_requests=0,
-            benchmark_expenditure=None,
-            net_expenditure=0.0,
-            total_wait=0.0,
-            total_walk=0.0,
-            total_onboard=0.0,
-            feasible=False,
-            feasibility_reason="benchmark_mode_infeasible",
-        )
+    guarded_result = _benchmark_guard(2, requests, scenario, benchmark_expenditure)
+    if guarded_result is not None:
+        return guarded_result
 
+    acc = _init_mode_accumulator()
     loop = _build_loop_context(graph)
     candidate_locations = _build_mode_2_locations(loop)
     loads: defaultdict[tuple[int, int, int], int] = defaultdict(int)
     vehicle_completion = {vehicle_id: 0.0 for vehicle_id in range(FLEET_SIZE)}
     vehicle_delay = {vehicle_id: 0 for vehicle_id in range(FLEET_SIZE)}
-    completion_sum = 0.0
-    served_requests = 0
-    total_wait = 0.0
-    total_walk = 0.0
-    total_onboard = 0.0
 
     for request in _sorted_requests(requests):
-        best_choice: dict[str, Any] | None = None
-        benchmark_blocked = False
+        candidates: list[dict[str, Any]] = []
 
         for boarding_location in candidate_locations:
             boarding_node = boarding_location["node"]
@@ -305,28 +443,25 @@ def evaluate_mode_2( # 评估偏离路线模式 deviated route
                     route_start_time = anchor_time + route_entry_offset
                     wait_time = float(passenger_board_time - request.departure_time)
 
-                    if not _check_loop_capacity(
-                        loads,
-                        vehicle_id,
-                        route_start_time,
-                        boarding_anchor,
-                        alighting_anchor,
-                        loop.route_length,
-                    ):
-                        continue
-
                     candidate_completion = max(
                         vehicle_completion[vehicle_id],
                         float(anchor_time + operator_finish_offset),
                     )
-                    candidate_expenditure = (
-                        completion_sum
+                    candidate_travel_distance = (
+                        acc.total_travel_distance
                         - vehicle_completion[vehicle_id]
                         + candidate_completion
                     )
-                    if candidate_expenditure > benchmark_expenditure + 1e-9:
-                        benchmark_blocked = True
-                        continue
+                    candidate_departures = (
+                        acc.total_departures
+                        - _loop_departure_count(vehicle_completion[vehicle_id], loop.route_length)
+                        + _loop_departure_count(candidate_completion, loop.route_length)
+                    )
+                    candidate_expenditure = _calculate_net_expenditure(
+                        candidate_travel_distance,
+                        candidate_departures,
+                        acc.served_requests + 1,
+                    )
 
                     ranking = (
                         wait_time + walk_time + passenger_onboard,
@@ -340,13 +475,15 @@ def evaluate_mode_2( # 评估偏离路线模式 deviated route
                         boarding_node,
                         alighting_node,
                     )
-                    if best_choice is None or ranking < best_choice["ranking"]:
-                        best_choice = {
+                    candidates.append(
+                        {
                             "vehicle_id": vehicle_id,
                             "boarding_anchor": boarding_anchor,
                             "alighting_anchor": alighting_anchor,
                             "route_start_time": route_start_time,
                             "candidate_completion": candidate_completion,
+                            "candidate_travel_distance": candidate_travel_distance,
+                            "candidate_departures": candidate_departures,
                             "candidate_expenditure": candidate_expenditure,
                             "added_delay": 2 * optional_count,
                             "wait_time": wait_time,
@@ -354,20 +491,46 @@ def evaluate_mode_2( # 评估偏离路线模式 deviated route
                             "onboard_time": passenger_onboard,
                             "ranking": ranking,
                         }
+                    )
+
+        def loop_capacity_constraint(candidate: dict[str, Any]) -> str | None:
+            if _check_loop_capacity(
+                loads,
+                int(candidate["vehicle_id"]),
+                int(candidate["route_start_time"]),
+                int(candidate["boarding_anchor"]),
+                int(candidate["alighting_anchor"]),
+                loop.route_length,
+            ):
+                return None
+            return "capacity_limit"
+
+        def benchmark_constraint(candidate: dict[str, Any]) -> str | None:
+            if _is_strictly_below_benchmark(
+                float(candidate["candidate_expenditure"]),
+                benchmark_expenditure,
+            ):
+                return None
+            return "benchmark_exceeded"
+
+        best_choice, failure_reasons = _minimize_candidate(
+            candidates,
+            (loop_capacity_constraint, benchmark_constraint),
+        )
 
         if best_choice is None:
-            return _finalize_result(
+            return _finalize_nonbaseline_mode(
                 mode_id=2,
                 scenario=scenario,
-                total_requests=len(requests),
-                served_requests=served_requests,
+                requests=requests,
                 benchmark_expenditure=benchmark_expenditure,
-                net_expenditure=completion_sum,
-                total_wait=total_wait,
-                total_walk=total_walk,
-                total_onboard=total_onboard,
+                acc=acc,
                 feasible=False,
-                feasibility_reason="benchmark_exceeded" if benchmark_blocked else "capacity_limit",
+                feasibility_reason=(
+                    "benchmark_exceeded"
+                    if "benchmark_exceeded" in failure_reasons
+                    else "capacity_limit"
+                ),
             )
 
         _reserve_loop_capacity(
@@ -381,154 +544,204 @@ def evaluate_mode_2( # 评估偏离路线模式 deviated route
         vehicle_id = int(best_choice["vehicle_id"])
         vehicle_completion[vehicle_id] = float(best_choice["candidate_completion"])
         vehicle_delay[vehicle_id] += int(best_choice["added_delay"])
-        completion_sum = float(best_choice["candidate_expenditure"])
-        served_requests += 1
-        total_wait += float(best_choice["wait_time"])
-        total_walk += float(best_choice["walk_time"])
-        total_onboard += float(best_choice["onboard_time"])
+        acc.served_requests += 1
+        acc.total_wait += float(best_choice["wait_time"])
+        acc.total_walk += float(best_choice["walk_time"])
+        acc.total_onboard += float(best_choice["onboard_time"])
+        _set_operator_metrics(
+            acc,
+            float(best_choice["candidate_travel_distance"]),
+            int(best_choice["candidate_departures"]),
+        )
 
-    return _finalize_result(
+    return _finalize_nonbaseline_mode(
         mode_id=2,
         scenario=scenario,
-        total_requests=len(requests),
-        served_requests=served_requests,
+        requests=requests,
         benchmark_expenditure=benchmark_expenditure,
-        net_expenditure=completion_sum,
-        total_wait=total_wait,
-        total_walk=total_walk,
-        total_onboard=total_onboard,
+        acc=acc,
         feasible=True,
         feasibility_reason="feasible",
     )
 
 
-def evaluate_mode_3( # 评估动态路线模式 DRT rolling horizon
+def evaluate_mode_3( # 评估动态路线模式 DRT rolling horizon **lookahead = 20** 
     requests: list[TripRequest],
     scenario: Scenario,
     graph: nx.Graph,
     benchmark_expenditure: float | None,
 ) -> dict[str, Any]:
-    if benchmark_expenditure is None:
-        return _finalize_result(
-            mode_id=3,
-            scenario=scenario,
-            total_requests=len(requests),
-            served_requests=0,
-            benchmark_expenditure=None,
-            net_expenditure=0.0,
-            total_wait=0.0,
-            total_walk=0.0,
-            total_onboard=0.0,
-            feasible=False,
-            feasibility_reason="benchmark_mode_infeasible",
-        )
+    guarded_result = _benchmark_guard(3, requests, scenario, benchmark_expenditure)
+    if guarded_result is not None:
+        return guarded_result
 
-    vehicle_schedules: dict[int, list[TripRequest]] = {
-        vehicle_id: [] for vehicle_id in range(FLEET_SIZE)
+    acc = _init_mode_accumulator()
+    vehicle_states: dict[int, DrtVehicleState] = {
+        vehicle_id: DrtVehicleState() for vehicle_id in range(FLEET_SIZE)
     }
-    vehicle_evaluations = {
-        vehicle_id: _evaluate_drt_schedule([], graph) for vehicle_id in range(FLEET_SIZE)
-    }
-    assigned_request_ids: set[int] = set()
-    current_active_travel = 0.0
-    lookahead = 20
+    for state in vehicle_states.values():
+        state.pending_evaluation = _evaluate_drt_schedule([], graph)
+
+    scheduled_request_ids: set[int] = set()
+    lookahead = 20 # 滚动规划的时间窗口大小 (rolling horizon lookahead), 每次规划时只考虑在当前时间加上lookahead内的请求
     step = 10
     max_departure = max((request.departure_time for request in requests), default=0)
-    planning_time = 0
+    planning_time = 0 # 从0开始的滚动规划时间, 每次循环增加step，直到超过max_departure + lookahead或者所有请求都被安排
+    sorted_requests = _sorted_requests(requests)
 
-    while planning_time <= max_departure + lookahead and len(assigned_request_ids) < len(requests):
+    def sync_accumulator() -> None:
+        totals = _drt_state_totals(vehicle_states)
+        acc.served_requests = len(scheduled_request_ids)
+        acc.total_wait = totals["wait"]
+        acc.total_walk = 0.0
+        acc.total_onboard = totals["onboard"]
+        _set_operator_metrics(
+            acc,
+            totals["travel_distance"],
+            int(totals["departures"]),
+        )
+
+    while planning_time <= max_departure + lookahead and len(scheduled_request_ids) < len(requests):
+        for state in vehicle_states.values():
+            _advance_drt_vehicle_state(state, planning_time, graph)
+
         visible_requests = [
             request
-            for request in _sorted_requests(requests)
-            if request.request_id not in assigned_request_ids
+            for request in sorted_requests
+            if request.request_id not in scheduled_request_ids
             and request.departure_time <= planning_time + lookahead
         ]
 
         for request in visible_requests:
-            if request.request_id in assigned_request_ids:
+            if request.request_id in scheduled_request_ids:
                 continue
 
-            best_insertion: dict[str, Any] | None = None
-            for vehicle_id in range(FLEET_SIZE):
-                schedule = vehicle_schedules[vehicle_id]
+            current_totals = _drt_state_totals(vehicle_states)
+            current_total_service = current_totals["wait"] + current_totals["onboard"]
+            candidates: list[dict[str, Any]] = []
+            for vehicle_id, state in vehicle_states.items():
+                schedule = state.pending_requests
+                current_pending_wait = _sum_evaluation_metric(
+                    state.pending_evaluation,
+                    "wait",
+                )
+                current_pending_onboard = _sum_evaluation_metric(
+                    state.pending_evaluation,
+                    "onboard",
+                )
+                current_pending_travel = float(state.pending_evaluation["active_travel"])
                 for position in range(len(schedule) + 1):
                     candidate_schedule = schedule[:position] + [request] + schedule[position:]
-                    candidate_evaluation = _evaluate_drt_schedule(candidate_schedule, graph)
-                    candidate_active_travel = (
-                        current_active_travel
-                        - vehicle_evaluations[vehicle_id]["active_travel"]
-                        + candidate_evaluation["active_travel"]
+                    candidate_evaluation = _evaluate_drt_schedule(
+                        candidate_schedule,
+                        graph,
+                        start_time=state.current_time,
+                        start_location=state.current_location,
                     )
-                    if candidate_active_travel > benchmark_expenditure + 1e-9:
-                        continue
+                    candidate_pending_wait = _sum_evaluation_metric(
+                        candidate_evaluation,
+                        "wait",
+                    )
+                    candidate_pending_onboard = _sum_evaluation_metric(
+                        candidate_evaluation,
+                        "onboard",
+                    )
+                    candidate_total_service = (
+                        current_total_service
+                        - current_pending_wait
+                        - current_pending_onboard
+                        + candidate_pending_wait
+                        + candidate_pending_onboard
+                    )
+                    candidate_total_wait = (
+                        current_totals["wait"]
+                        - current_pending_wait
+                        + candidate_pending_wait
+                    )
+                    candidate_total_travel = (
+                        current_totals["travel_distance"]
+                        - current_pending_travel
+                        + float(candidate_evaluation["active_travel"])
+                    )
+                    candidate_departures = int(
+                        current_totals["departures"] + int(not state.has_departed)
+                    )
+                    candidate_expenditure = _calculate_net_expenditure(
+                        candidate_total_travel,
+                        candidate_departures,
+                        len(scheduled_request_ids) + 1,
+                    )
 
-                    inserted_assignment = candidate_evaluation["assignments"][position]
                     ranking = (
-                        inserted_assignment["wait"],
-                        inserted_assignment["onboard"],
-                        candidate_active_travel - current_active_travel,
+                        candidate_total_service,
+                        candidate_total_wait,
+                        candidate_expenditure,
                         vehicle_id,
                         position,
                     )
-                    if best_insertion is None or ranking < best_insertion["ranking"]:
-                        best_insertion = {
+                    candidates.append(
+                        {
                             "vehicle_id": vehicle_id,
                             "schedule": candidate_schedule,
                             "evaluation": candidate_evaluation,
-                            "candidate_active_travel": candidate_active_travel,
+                            "candidate_departures": candidate_departures,
+                            "candidate_expenditure": candidate_expenditure,
                             "ranking": ranking,
                         }
+                    )
+
+            def benchmark_constraint(candidate: dict[str, Any]) -> str | None:
+                if _is_strictly_below_benchmark(
+                    float(candidate["candidate_expenditure"]),
+                    benchmark_expenditure,
+                ):
+                    return None
+                return "benchmark_exceeded"
+
+            best_insertion, _ = _minimize_candidate(
+                candidates,
+                (benchmark_constraint,),
+            )
 
             if best_insertion is None:
-                return _finalize_result(
+                sync_accumulator()
+                return _finalize_nonbaseline_mode(
                     mode_id=3,
                     scenario=scenario,
-                    total_requests=len(requests),
-                    served_requests=len(assigned_request_ids),
+                    requests=requests,
                     benchmark_expenditure=benchmark_expenditure,
-                    net_expenditure=current_active_travel,
-                    total_wait=_sum_assignment_metric(vehicle_evaluations, "wait"),
-                    total_walk=0.0,
-                    total_onboard=_sum_assignment_metric(vehicle_evaluations, "onboard"),
+                    acc=acc,
                     feasible=False,
                     feasibility_reason="insertion_failed",
                 )
 
             vehicle_id = int(best_insertion["vehicle_id"])
-            vehicle_schedules[vehicle_id] = list(best_insertion["schedule"])
-            vehicle_evaluations[vehicle_id] = dict(best_insertion["evaluation"])
-            current_active_travel = float(best_insertion["candidate_active_travel"])
-            assigned_request_ids.add(request.request_id)
+            vehicle_states[vehicle_id].pending_requests = list(best_insertion["schedule"])
+            vehicle_states[vehicle_id].pending_evaluation = dict(best_insertion["evaluation"])
+            vehicle_states[vehicle_id].has_departed = True
+            scheduled_request_ids.add(request.request_id)
 
         planning_time += step
 
-    if len(assigned_request_ids) != len(requests):
-        return _finalize_result(
+    if len(scheduled_request_ids) != len(requests):
+        sync_accumulator()
+        return _finalize_nonbaseline_mode(
             mode_id=3,
             scenario=scenario,
-            total_requests=len(requests),
-            served_requests=len(assigned_request_ids),
+            requests=requests,
             benchmark_expenditure=benchmark_expenditure,
-            net_expenditure=current_active_travel,
-            total_wait=_sum_assignment_metric(vehicle_evaluations, "wait"),
-            total_walk=0.0,
-            total_onboard=_sum_assignment_metric(vehicle_evaluations, "onboard"),
+            acc=acc,
             feasible=False,
             feasibility_reason="unassigned_requests",
         )
 
-    total_wait = _sum_assignment_metric(vehicle_evaluations, "wait")
-    total_onboard = _sum_assignment_metric(vehicle_evaluations, "onboard")
-    return _finalize_result(
+    sync_accumulator()
+    return _finalize_nonbaseline_mode(
         mode_id=3,
         scenario=scenario,
-        total_requests=len(requests),
-        served_requests=len(requests),
+        requests=requests,
         benchmark_expenditure=benchmark_expenditure,
-        net_expenditure=current_active_travel,
-        total_wait=total_wait,
-        total_walk=0.0,
-        total_onboard=total_onboard,
+        acc=acc,
         feasible=True,
         feasibility_reason="feasible",
     )
@@ -540,31 +753,16 @@ def evaluate_mode_4( # 评估枢纽辐射模式 hub-and-spoke
     graph: nx.Graph,
     benchmark_expenditure: float | None,
 ) -> dict[str, Any]:
-    if benchmark_expenditure is None:
-        return _finalize_result(
-            mode_id=4,
-            scenario=scenario,
-            total_requests=len(requests),
-            served_requests=0,
-            benchmark_expenditure=None,
-            net_expenditure=0.0,
-            total_wait=0.0,
-            total_walk=0.0,
-            total_onboard=0.0,
-            feasible=False,
-            feasibility_reason="benchmark_mode_infeasible",
-        )
+    guarded_result = _benchmark_guard(4, requests, scenario, benchmark_expenditure)
+    if guarded_result is not None:
+        return guarded_result
 
+    acc = _init_mode_accumulator()
     spoke_paths = _build_spoke_paths(graph)
     spoke_stops = _build_spoke_stop_list(spoke_paths)
     dispatches = _build_spoke_dispatches()
     loads: defaultdict[tuple[int, GridNode, GridNode, int], int] = defaultdict(int)
-    vehicle_completion = {vehicle_id: 0.0 for vehicle_id in range(FLEET_SIZE)}
-    completion_sum = 0.0
-    served_requests = 0
-    total_wait = 0.0
-    total_walk = 0.0
-    total_onboard = 0.0
+    used_cycles: set[tuple[int, int]] = set()
 
     for request in _sorted_requests(requests):
         origin_stop = _nearest_spoke_stop(request.origin, spoke_stops, graph)
@@ -582,16 +780,12 @@ def evaluate_mode_4( # 评估枢纽辐射模式 hub-and-spoke
             loads,
         )
         if inbound_leg is None:
-            return _finalize_result(
+            return _finalize_nonbaseline_mode(
                 mode_id=4,
                 scenario=scenario,
-                total_requests=len(requests),
-                served_requests=served_requests,
+                requests=requests,
                 benchmark_expenditure=benchmark_expenditure,
-                net_expenditure=completion_sum,
-                total_wait=total_wait,
-                total_walk=total_walk,
-                total_onboard=total_onboard,
+                acc=acc,
                 feasible=False,
                 feasibility_reason="capacity_limit",
             )
@@ -604,43 +798,37 @@ def evaluate_mode_4( # 评估枢纽辐射模式 hub-and-spoke
             loads,
         )
         if outbound_leg is None:
-            return _finalize_result(
+            return _finalize_nonbaseline_mode(
                 mode_id=4,
                 scenario=scenario,
-                total_requests=len(requests),
-                served_requests=served_requests,
+                requests=requests,
                 benchmark_expenditure=benchmark_expenditure,
-                net_expenditure=completion_sum,
-                total_wait=total_wait,
-                total_walk=total_walk,
-                total_onboard=total_onboard,
+                acc=acc,
                 feasible=False,
                 feasibility_reason="capacity_limit",
             )
 
-        updated_completion = dict(vehicle_completion)
-        candidate_completion_sum = completion_sum
-        for leg in (inbound_leg, outbound_leg):
-            vehicle_id = leg.get("vehicle_id")
-            if vehicle_id is None:
-                continue
-            cycle_finish = float(leg["cycle_finish"])
-            previous = updated_completion[int(vehicle_id)]
-            if cycle_finish > previous:
-                candidate_completion_sum += cycle_finish - previous
-                updated_completion[int(vehicle_id)] = cycle_finish
+        candidate_cycles = {
+            tuple(leg["departure_key"])
+            for leg in (inbound_leg, outbound_leg)
+            if leg.get("departure_key") is not None
+        }
+        added_cycles = candidate_cycles - used_cycles
+        candidate_departures = acc.total_departures + len(added_cycles)
+        candidate_travel_distance = acc.total_travel_distance + 8.0 * len(added_cycles)
+        candidate_expenditure = _calculate_net_expenditure(
+            candidate_travel_distance,
+            candidate_departures,
+            acc.served_requests + 1,
+        )
 
-        if candidate_completion_sum > benchmark_expenditure + 1e-9:
-            return _finalize_result(
+        if not _is_strictly_below_benchmark(candidate_expenditure, benchmark_expenditure):
+            return _finalize_nonbaseline_mode(
                 mode_id=4,
                 scenario=scenario,
-                total_requests=len(requests),
-                served_requests=served_requests,
+                requests=requests,
                 benchmark_expenditure=benchmark_expenditure,
-                net_expenditure=completion_sum,
-                total_wait=total_wait,
-                total_walk=total_walk,
-                total_onboard=total_onboard,
+                acc=acc,
                 feasible=False,
                 feasibility_reason="benchmark_exceeded",
             )
@@ -655,23 +843,23 @@ def evaluate_mode_4( # 评估枢纽辐射模式 hub-and-spoke
                 int(leg["start_time"]),
             )
 
-        vehicle_completion = updated_completion
-        completion_sum = candidate_completion_sum
-        served_requests += 1
-        total_wait += float(inbound_leg["wait_time"]) + float(outbound_leg["wait_time"])
-        total_walk += walk_time
-        total_onboard += float(inbound_leg["onboard_time"]) + float(outbound_leg["onboard_time"])
+        used_cycles.update(added_cycles)
+        acc.served_requests += 1
+        acc.total_wait += float(inbound_leg["wait_time"]) + float(outbound_leg["wait_time"])
+        acc.total_walk += walk_time
+        acc.total_onboard += float(inbound_leg["onboard_time"]) + float(outbound_leg["onboard_time"])
+        _set_operator_metrics(
+            acc,
+            candidate_travel_distance,
+            candidate_departures,
+        )
 
-    return _finalize_result(
+    return _finalize_nonbaseline_mode(
         mode_id=4,
         scenario=scenario,
-        total_requests=len(requests),
-        served_requests=served_requests,
+        requests=requests,
         benchmark_expenditure=benchmark_expenditure,
-        net_expenditure=completion_sum,
-        total_wait=total_wait,
-        total_walk=total_walk,
-        total_onboard=total_onboard,
+        acc=acc,
         feasible=True,
         feasibility_reason="feasible",
     )
@@ -790,10 +978,12 @@ def _reserve_loop_capacity(
 def _evaluate_drt_schedule(
     scheduled_requests: list[TripRequest],
     graph: nx.Graph,
+    start_time: int = 0,
+    start_location: GridNode = HUB,
 ) -> dict[str, Any]:
     assignments: list[dict[str, Any]] = []
-    current_time = 0
-    current_location = HUB
+    current_time = start_time
+    current_location = start_location
     active_travel = 0.0
 
     for request in scheduled_requests:
@@ -805,10 +995,12 @@ def _evaluate_drt_schedule(
         assignments.append(
             {
                 "request_id": request.request_id,
+                "arrival_at_origin": float(arrival_at_origin),
                 "pickup_time": float(pickup_time),
                 "dropoff_time": float(dropoff_time),
                 "wait": float(pickup_time - request.departure_time),
                 "onboard": float(onboard_time),
+                "active_travel_increment": float(deadhead + onboard_time),
             }
         )
         active_travel += float(deadhead + onboard_time)
@@ -819,6 +1011,7 @@ def _evaluate_drt_schedule(
         "assignments": assignments,
         "completion_time": float(current_time),
         "active_travel": float(active_travel),
+        "completion_location": current_location,
     }
 
 
@@ -830,6 +1023,92 @@ def _sum_assignment_metric(
     for evaluation in vehicle_evaluations.values():
         total += sum(float(assignment[metric]) for assignment in evaluation["assignments"])
     return total
+
+
+def _sum_evaluation_metric(
+    evaluation: dict[str, Any],
+    metric: str,
+) -> float:
+    return sum(float(assignment[metric]) for assignment in evaluation["assignments"])
+
+
+def _advance_drt_vehicle_state(
+    state: DrtVehicleState,
+    planning_time: int,
+    graph: nx.Graph,
+) -> None:
+    if not state.pending_requests:
+        state.pending_evaluation = _evaluate_drt_schedule(
+            [],
+            graph,
+            start_time=state.current_time,
+            start_location=state.current_location,
+        )
+        return
+
+    evaluation = _evaluate_drt_schedule(
+        state.pending_requests,
+        graph,
+        start_time=state.current_time,
+        start_location=state.current_location,
+    )
+    committed_count = 0
+    for assignment in evaluation["assignments"]:
+        if float(assignment["pickup_time"]) <= planning_time:
+            committed_count += 1
+        else:
+            break
+
+    if committed_count == 0:
+        state.pending_evaluation = evaluation
+        return
+
+    for assignment in evaluation["assignments"][:committed_count]:
+        state.committed_wait += float(assignment["wait"])
+        state.committed_onboard += float(assignment["onboard"])
+        state.committed_active_travel += float(assignment["active_travel_increment"])
+
+    last_committed_request = state.pending_requests[committed_count - 1]
+    last_committed_assignment = evaluation["assignments"][committed_count - 1]
+    state.current_time = int(last_committed_assignment["dropoff_time"])
+    state.current_location = last_committed_request.destination
+    state.pending_requests = state.pending_requests[committed_count:]
+    state.pending_evaluation = _evaluate_drt_schedule(
+        state.pending_requests,
+        graph,
+        start_time=state.current_time,
+        start_location=state.current_location,
+    )
+
+
+def _drt_state_totals(
+    vehicle_states: dict[int, DrtVehicleState],
+) -> dict[str, float]:
+    total_wait = 0.0
+    total_onboard = 0.0
+    total_travel_distance = 0.0
+    total_departures = 0.0
+
+    for state in vehicle_states.values():
+        total_wait += state.committed_wait + _sum_evaluation_metric(
+            state.pending_evaluation,
+            "wait",
+        )
+        total_onboard += state.committed_onboard + _sum_evaluation_metric(
+            state.pending_evaluation,
+            "onboard",
+        )
+        total_travel_distance += state.committed_active_travel + float(
+            state.pending_evaluation["active_travel"]
+        )
+        total_departures += float(state.has_departed)
+
+    return {
+        "wait": total_wait,
+        "onboard": total_onboard,
+        "travel_distance": total_travel_distance,
+        "departures": total_departures,
+    }
 
 
 def _build_spoke_paths(graph: nx.Graph) -> dict[str, tuple[GridNode, ...]]:
@@ -906,27 +1185,29 @@ def _select_inbound_leg(
             "wait_time": 0.0,
             "onboard_time": 0.0,
             "cycle_finish": float(earliest_time),
+            "departure_key": None,
         }
 
     spoke_name = _spoke_name_for_stop(stop)
     path_to_hub = nx.shortest_path(graph, stop, HUB, weight="weight")
     distance_to_hub = len(path_to_hub) - 1
-    best_leg: dict[str, Any] | None = None
+    candidates: list[dict[str, Any]] = []
 
     for dispatch in dispatches[spoke_name]:
         first_inbound_pass = dispatch.first_departure + 8 - distance_to_hub
         boarding_time = _next_cyclic_pass(earliest_time, first_inbound_pass, 8)
-        if not _check_path_capacity(loads, dispatch.vehicle_id, path_to_hub, boarding_time):
-            continue
 
         arrival_time = boarding_time + distance_to_hub
+        cycle_start_time = boarding_time - (8 - distance_to_hub)
         ranking = (
+            (boarding_time - earliest_time) + distance_to_hub,
             boarding_time - earliest_time,
+            distance_to_hub,
             arrival_time,
             dispatch.vehicle_id,
         )
-        if best_leg is None or ranking < best_leg["ranking"]:
-            best_leg = {
+        candidates.append(
+            {
                 "vehicle_id": dispatch.vehicle_id,
                 "path": path_to_hub,
                 "start_time": float(boarding_time),
@@ -934,9 +1215,22 @@ def _select_inbound_leg(
                 "wait_time": float(boarding_time - earliest_time),
                 "onboard_time": float(distance_to_hub),
                 "cycle_finish": float(arrival_time),
+                "departure_key": (dispatch.vehicle_id, cycle_start_time),
                 "ranking": ranking,
             }
+        )
 
+    def capacity_constraint(candidate: dict[str, Any]) -> str | None:
+        if _check_path_capacity(
+            loads,
+            int(candidate["vehicle_id"]),
+            list(candidate["path"]),
+            int(candidate["start_time"]),
+        ):
+            return None
+        return "capacity_limit"
+
+    best_leg, _ = _minimize_candidate(candidates, (capacity_constraint,))
     return best_leg
 
 
@@ -956,27 +1250,28 @@ def _select_outbound_leg(
             "wait_time": 0.0,
             "onboard_time": 0.0,
             "cycle_finish": float(earliest_hub_departure),
+            "departure_key": None,
         }
 
     spoke_name = _spoke_name_for_stop(stop)
     path_from_hub = nx.shortest_path(graph, HUB, stop, weight="weight")
     distance_from_hub = len(path_from_hub) - 1
-    best_leg: dict[str, Any] | None = None
+    candidates: list[dict[str, Any]] = []
 
     for dispatch in dispatches[spoke_name]:
         departure_time = _next_cyclic_pass(earliest_hub_departure, dispatch.first_departure, 8)
-        if not _check_path_capacity(loads, dispatch.vehicle_id, path_from_hub, departure_time):
-            continue
 
         arrival_time = departure_time + distance_from_hub
         cycle_finish = departure_time + 8
         ranking = (
+            (departure_time - earliest_hub_departure) + distance_from_hub,
             departure_time - earliest_hub_departure,
+            distance_from_hub,
             arrival_time,
             dispatch.vehicle_id,
         )
-        if best_leg is None or ranking < best_leg["ranking"]:
-            best_leg = {
+        candidates.append(
+            {
                 "vehicle_id": dispatch.vehicle_id,
                 "path": path_from_hub,
                 "start_time": float(departure_time),
@@ -984,9 +1279,22 @@ def _select_outbound_leg(
                 "wait_time": float(departure_time - earliest_hub_departure),
                 "onboard_time": float(distance_from_hub),
                 "cycle_finish": float(cycle_finish),
+                "departure_key": (dispatch.vehicle_id, departure_time),
                 "ranking": ranking,
             }
+        )
 
+    def capacity_constraint(candidate: dict[str, Any]) -> str | None:
+        if _check_path_capacity(
+            loads,
+            int(candidate["vehicle_id"]),
+            list(candidate["path"]),
+            int(candidate["start_time"]),
+        ):
+            return None
+        return "capacity_limit"
+
+    best_leg, _ = _minimize_candidate(candidates, (capacity_constraint,))
     return best_leg
 
 
