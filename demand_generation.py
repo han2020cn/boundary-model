@@ -19,14 +19,14 @@ def _build_grid_nodes(grid_size: int) -> list[GridNode]:
     return [(x, y) for x in range(grid_size) for y in range(grid_size)]
 
 
-def _normalize_weights(weights: np.ndarray) -> np.ndarray:
+def _normalize_weights(weights: np.ndarray) -> np.ndarray: # 归一化权重
     total = float(weights.sum())
     if total <= 0.0:
         return np.full(weights.shape, 1.0 / weights.size, dtype=float)
     return weights / total
 
 
-def _hotspot_weights(nodes: list[GridNode], hotspot: GridNode) -> np.ndarray:
+def _hotspot_weights(nodes: list[GridNode], hotspot: GridNode) -> np.ndarray: # 计算每个节点到热点的曼哈顿距离，并将距离转换为权重，距离越近权重越大
     distances = np.array(
         [abs(node[0] - hotspot[0]) + abs(node[1] - hotspot[1]) for node in nodes],
         dtype=float,
@@ -34,7 +34,7 @@ def _hotspot_weights(nodes: list[GridNode], hotspot: GridNode) -> np.ndarray:
     return np.exp(-0.6 * distances)
 
 
-def _mix_spatial_weights(
+def _mix_spatial_weights( # 混合空间权重
     uniform_weights: np.ndarray,
     hotspot_weights: np.ndarray,
     heterogeneity: float,
@@ -73,7 +73,7 @@ def generate_requests(
     minute_indices = np.arange(horizon)
     uniform_node_weights = np.full(len(nodes), 1.0 / len(nodes), dtype=float)
 
-    origin_hotspot = (1, 1)
+    origin_hotspot = (2, 2)
     destination_hotspot = (grid_size - 2, grid_size - 2)
     origin_weights = _mix_spatial_weights(
         uniform_node_weights,
