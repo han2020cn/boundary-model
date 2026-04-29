@@ -14,7 +14,7 @@ DISTANCE_CACHE_KEY = "_boundary_model_shortest_path_lengths"
 GridNode = tuple[int, int]
 Scenario = dict[str, Any]
 CandidateConstraint = Callable[[dict[str, Any]], str | None]
-
+# 如果需要成组传递车辆参数，可以创建class
 FLEET_SIZE = 7
 VEHICLE_CAPACITY = 30
 HUB: GridNode = (4, 4)
@@ -34,6 +34,7 @@ MODE_NAMES = {
     3: "drt_rolling_horizon",
     4: "hub_and_spoke",
 }
+
 SPOKE_ORDER = ("north", "east", "south", "west")
 RESULT_COLUMNS = [
     "scenario_id",
@@ -60,7 +61,7 @@ RESULT_COLUMNS = [
     "avg_service_time",
 ]
 
-
+# loop route for mode 1 and 2
 @dataclass(frozen=True, slots=True)
 class LoopContext:
     route_nodes: tuple[GridNode, ...]
@@ -70,19 +71,21 @@ class LoopContext:
     optional_anchor_indices: dict[GridNode, int]
     vehicle_offsets: tuple[int, ...]
 
-
+# spoke paths for mode 4
 @dataclass(frozen=True, slots=True)
 class SpokeVehicle:
     vehicle_id: int
     spoke_name: str
     first_departure: int
 
+# results
 @dataclass
-class requets:
+class requests:
     request_id: int
     origin: GridNode
     destination: GridNode
     departure_time: int
+
 @dataclass(slots=True)
 class ModeAccumulator:
     served_requests: int = 0
@@ -171,30 +174,6 @@ def _loop_departure_count(completion_time: float, cycle_length: int) -> int:
     if completion_time <= 0.0:
         return 0
     return int(math.ceil(completion_time / cycle_length))
-
-
-def _benchmark_guard(
-    mode_id: int,
-    requests: list[TripRequest],
-    scenario: Scenario,
-    benchmark_expenditure: float | None,
-) -> dict[str, Any] | None:
-    if benchmark_expenditure is not None:
-        return None
-
-    return _finalize_result(
-        mode_id=mode_id,
-        scenario=scenario,
-        total_requests=len(requests),
-        served_requests=0,
-        benchmark_expenditure=None,
-        net_expenditure=0.0,
-        total_wait=0.0,
-        total_walk=0.0,
-        total_onboard=0.0,
-        feasible=False,
-        feasibility_reason="benchmark_mode_infeasible",
-    )
 
 
 def _finalize_nonbaseline_mode(
@@ -387,9 +366,6 @@ def evaluate_mode_2( # 评估偏离路线模式 deviated route
     graph: nx.Graph,
     benchmark_expenditure: float | None,
 ) -> dict[str, Any]:
-    guarded_result = _benchmark_guard(2, requests, scenario, benchmark_expenditure)
-    if guarded_result is not None:
-        return guarded_result
 
     acc = _init_mode_accumulator()
     loop = _build_loop_context(graph)
@@ -571,9 +547,6 @@ def evaluate_mode_3( # 评估动态路线模式 DRT rolling horizon **lookahead 
     graph: nx.Graph,
     benchmark_expenditure: float | None,
 ) -> dict[str, Any]:
-    guarded_result = _benchmark_guard(3, requests, scenario, benchmark_expenditure)
-    if guarded_result is not None:
-        return guarded_result
 
     acc = _init_mode_accumulator()
     vehicle_states: dict[int, DrtVehicleState] = {
@@ -703,7 +676,7 @@ def evaluate_mode_3( # 评估动态路线模式 DRT rolling horizon **lookahead 
                 (benchmark_constraint,),
             )
 
-            if best_insertion is None:
+            if best_insertion is None: 
                 sync_accumulator()
                 return _finalize_nonbaseline_mode(
                     mode_id=3,
@@ -712,7 +685,7 @@ def evaluate_mode_3( # 评估动态路线模式 DRT rolling horizon **lookahead 
                     benchmark_expenditure=benchmark_expenditure,
                     acc=acc,
                     feasible=False,
-                    feasibility_reason="insertion_failed",
+                    feasibility_reason="insertion_failed",# 没有找到满足基准约束的插入方案
                 )
 
             vehicle_id = int(best_insertion["vehicle_id"])
@@ -753,9 +726,6 @@ def evaluate_mode_4( # 评估枢纽辐射模式 hub-and-spoke
     graph: nx.Graph,
     benchmark_expenditure: float | None,
 ) -> dict[str, Any]:
-    guarded_result = _benchmark_guard(4, requests, scenario, benchmark_expenditure)
-    if guarded_result is not None:
-        return guarded_result
 
     acc = _init_mode_accumulator()
     spoke_paths = _build_spoke_paths(graph)
