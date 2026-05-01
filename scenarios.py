@@ -5,6 +5,7 @@ import pandas as pd
 from itertools import product
 from datetime import datetime
 from demand_generation import generate_requests
+import mode_set
 from mode_set import (
     RESULT_COLUMNS, # column names for the results DataFrame
     build_grid_graph,
@@ -36,8 +37,58 @@ def build_scenario_frame(lda: list, hs: list, ht: list,
         )
     return pd.DataFrame(rows)
 
+''''
+def _benchmark_mode_infeasible_result(
+    mode_id: int,
+    requests: list,
+    scenario: dict,
+) -> dict:
+    return mode_set._finalize_result(
+        mode_id=mode_id,
+        scenario=scenario,
+        total_requests=len(requests),
+        served_requests=0,
+        benchmark_expenditure=None,
+        net_expenditure=0.0,
+        total_wait=0.0,
+        total_walk=0.0,
+        total_onboard=0.0,
+        feasible=False,
+        feasibility_reason="benchmark_mode_infeasible",
+    )
+''''
 
-def run_scenarios(size, span, lda, hs, ht) -> pd.DataFrame:
+def evaluate_all(
+    requests: list,
+    scenario: dict,
+    graph,
+) -> list[dict]:
+    mode_1_result = evaluate_mode_1(requests, scenario, graph)
+    result_rows = [mode_1_result]
+
+    benchmark_expenditure = (
+        float(mode_1_result["net_expenditure"])
+        if mode_1_result["feasible"]
+        else None
+    )
+    if benchmark_expenditure is None:
+        result_rows.extend(
+            print('infeasible')
+        return result_rows
+
+    result_rows.append(
+        evaluate_mode_2(requests, scenario, graph, benchmark_expenditure)
+    )
+    result_rows.append(
+        evaluate_mode_3(requests, scenario, graph, benchmark_expenditure)
+    )
+    result_rows.append(
+        evaluate_mode_4(requests, scenario, graph, benchmark_expenditure)
+    )
+    return result_rows
+
+
+def demand_scenarios(size, span, lda, hs, ht) -> pd.DataFrame:
     graph = build_grid_graph(size)
     scenario_frame = build_scenario_frame(lda=lda, hs=hs, ht=ht)
     result_rows = []
@@ -52,25 +103,67 @@ def run_scenarios(size, span, lda, hs, ht) -> pd.DataFrame:
             horizon=span,
         )
 
-        mode_1_result = evaluate_mode_1(requests, scenario, graph)
-        result_rows.append(mode_1_result)
-
-        benchmark_expenditure = (
-            float(mode_1_result["net_expenditure"])
-            if mode_1_result["feasible"]
-            else None
-        )
-        result_rows.append(
-            evaluate_mode_2(requests, scenario, graph, benchmark_expenditure)
-        )
-        result_rows.append(
-            evaluate_mode_3(requests, scenario, graph, benchmark_expenditure)
-        )
-        result_rows.append(
-            evaluate_mode_4(requests, scenario, graph, benchmark_expenditure)
-        )
+        result_rows.extend(evaluate_all(requests, scenario, graph))
 
     return pd.DataFrame(result_rows, columns=RESULT_COLUMNS)
+
+
+def cost_scenarios(
+        lambda_value: float,
+        hs: float,
+        ht: float,
+        grid_size: int,
+        horizon: int,
+        fleet_sizes: tuple[int, ...],
+        capacities: tuple[int, ...],
+        seed_count: int,
+        base_seed: int,
+        output_dir: Path = Path.cwd(),
+        ) -> tuple[pd.DataFrame, Path]:
+    graph = build_grid_graph(grid_size)
+    result_rows = []
+    scenario_index = 1
+
+    for seed_offset in range(seed_count):
+        seed = base_seed + seed_offset
+        requests = generate_requests(
+            lambda_value=float(lambda_value),
+            hs=float(hs),
+            ht=float(ht),
+            seed=int(seed),
+            grid_size=grid_size,
+            horizon=horizon,
+        )
+
+        for fleet_size, capacity in product(fleet_sizes, capacities):
+            scenario = {
+                "scenario_id": (
+                    f"C{scenario_index:03d}_l{lambda_value:g}"
+                    f"_hs{hs:.1f}_ht{ht:.1f}"
+                    f"_f{fleet_size}_c{capacity}_seed{seed}"
+                ),
+                "lambda": int(lambda_value),
+                "hs": float(hs),
+                "ht": float(ht),
+                "seed": int(seed),
+                "fleet_size": int(fleet_size),
+                "capacity": int(capacity),
+            }
+
+            original_fleet_size = mode_set.FLEET_SIZE
+            original_vehicle_capacity = mode_set.VEHICLE_CAPACITY
+            try:
+                mode_set.FLEET_SIZE = int(fleet_size)
+                mode_set.VEHICLE_CAPACITY = int(capacity)
+                result_rows.extend(evaluate_all(requests, scenario, graph))
+            finally:
+                mode_set.FLEET_SIZE = original_fleet_size
+                mode_set.VEHICLE_CAPACITY = original_vehicle_capacity
+
+            scenario_index += 1
+
+    results_frame = pd.DataFrame(result_rows, columns=RESULT_COLUMNS)
+    return results_frame
 
 
 def results_export(results_frame: pd.DataFrame, output_dir: Path) ->  Path:

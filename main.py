@@ -14,9 +14,20 @@ HT_LEVELS = tuple(i/10 for i in range(0, 11)) # 时间异质性（temporal heter
 
 
 
-def main() -> pd.DataFrame:
-    results_frame = sc.run_scenarios(GRID_SIZE, HORIZON, 
+def main(scene: int) -> pd.DataFrame:
+    if scene == 1:
+        results_frame = sc.demand_scenarios(GRID_SIZE, HORIZON, 
                                      LAMBDA_LEVELS, HS_LEVELS, HT_LEVELS, 
+                                     )
+    else:
+        LAMBDA_LEVELS, HS_LEVELS, HT_LEVELS = 40, 0.5, 0.5
+        fleet_sizes=(3, 6, 9, 12, 15)
+        capacities=(15, 30, 45) 
+        seed_count=5
+        results_frame = sc.cost_scenarios(LAMBDA_LEVELS, HS_LEVELS, HT_LEVELS, 
+                                     GRID_SIZE, HORIZON, 
+                                     fleet_sizes, capacities, 
+                                     seed_count, BASE_SEED,
                                      )
     output_dir  = Path("/home/han/from-codex/boundary-model/rs")
     json_path = sc.results_export(results_frame, output_dir)
@@ -25,8 +36,7 @@ def main() -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    for i in range(3):
-        json_path = main()
+        json_path = main(2)
         print(f"JSON path: {json_path}")
         optimals_path = sc.optimals(json_path)
         plt.optimals_3d(optimals_path)
