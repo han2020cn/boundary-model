@@ -37,7 +37,7 @@ def build_scenario_frame(lda: list, hs: list, ht: list,
         )
     return pd.DataFrame(rows)
 
-''''
+'''
 def _benchmark_mode_infeasible_result(
     mode_id: int,
     requests: list,
@@ -56,12 +56,13 @@ def _benchmark_mode_infeasible_result(
         feasible=False,
         feasibility_reason="benchmark_mode_infeasible",
     )
-''''
+'''
 
 def evaluate_all(
     requests: list,
     scenario: dict,
     graph,
+    service_policy: str = "strict",
 ) -> list[dict]:
     mode_1_result = evaluate_mode_1(requests, scenario, graph)
     result_rows = [mode_1_result]
@@ -72,23 +73,46 @@ def evaluate_all(
         else None
     )
     if benchmark_expenditure is None:
-        result_rows.extend(
             print('infeasible')
-        return result_rows
 
     result_rows.append(
-        evaluate_mode_2(requests, scenario, graph, benchmark_expenditure)
+        evaluate_mode_2(
+            requests,
+            scenario,
+            graph,
+            benchmark_expenditure,
+            service_policy=service_policy,
+        )
     )
     result_rows.append(
-        evaluate_mode_3(requests, scenario, graph, benchmark_expenditure)
+        evaluate_mode_3(
+            requests,
+            scenario,
+            graph,
+            benchmark_expenditure,
+            service_policy=service_policy,
+        )
     )
     result_rows.append(
-        evaluate_mode_4(requests, scenario, graph, benchmark_expenditure)
+        evaluate_mode_4(
+            requests,
+            scenario,
+            graph,
+            benchmark_expenditure,
+            service_policy=service_policy,
+        )
     )
     return result_rows
 
 
-def demand_scenarios(size, span, lda, hs, ht) -> pd.DataFrame:
+def demand_scenarios(
+    size,
+    span,
+    lda,
+    hs,
+    ht,
+    service_policy: str = "strict",
+) -> pd.DataFrame:
     graph = build_grid_graph(size)
     scenario_frame = build_scenario_frame(lda=lda, hs=hs, ht=ht)
     result_rows = []
@@ -103,7 +127,14 @@ def demand_scenarios(size, span, lda, hs, ht) -> pd.DataFrame:
             horizon=span,
         )
 
-        result_rows.extend(evaluate_all(requests, scenario, graph))
+        result_rows.extend(
+            evaluate_all(
+                requests,
+                scenario,
+                graph,
+                service_policy=service_policy,
+            )
+        )
 
     return pd.DataFrame(result_rows, columns=RESULT_COLUMNS)
 
@@ -118,7 +149,7 @@ def cost_scenarios(
         capacities: tuple[int, ...],
         seed_count: int,
         base_seed: int,
-        output_dir: Path = Path.cwd(),
+        service_policy: str = "strict",
         ) -> tuple[pd.DataFrame, Path]:
     graph = build_grid_graph(grid_size)
     result_rows = []
@@ -155,7 +186,14 @@ def cost_scenarios(
             try:
                 mode_set.FLEET_SIZE = int(fleet_size)
                 mode_set.VEHICLE_CAPACITY = int(capacity)
-                result_rows.extend(evaluate_all(requests, scenario, graph))
+                result_rows.extend(
+                    evaluate_all(
+                        requests,
+                        scenario,
+                        graph,
+                        service_policy=service_policy,
+                    )
+                )
             finally:
                 mode_set.FLEET_SIZE = original_fleet_size
                 mode_set.VEHICLE_CAPACITY = original_vehicle_capacity
@@ -188,9 +226,9 @@ def optimals(json_path: Path):
     # 只保留可行方案
     feasible_df = df[df["feasible"] == True].copy()
 
-    # 先按 scenario_id 分组，再按 avg_service_time、net_expenditure 排序
+    # 先按 scenario_id 分组，再按 unserved_requests、avg_service_time、net_expenditure 排序
     feasible_df = feasible_df.sort_values(
-        by=["scenario_id", "avg_service_time", "net_expenditure"]
+        by=["scenario_id", "unserved_requests", "avg_service_time", "net_expenditure"]
     )
 
     # 每个 scenario 取第一条 = optimal mode

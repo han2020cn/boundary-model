@@ -6,8 +6,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 # from mpl_toolkits.mplot3d import Axes3D
 
-
-# ===== 2. 为不同 mode_id 设置颜色 =====
+# ===== 2. 为不同 mode_id 定义颜色 =====
 MODE_COLORS = {
     1: "tab:grey",
     2: "tab:blue",
@@ -22,54 +21,72 @@ MODE_LABELS = {
     4: "Mode 4",
 }
 
-# results.json xyz分别是net_expenditure, avg_service_time, total_requests
-def results_3d(path_file: Path) -> Path:
+#3d scatter plot
+def plts_3d(path_file: Path,
+            x_key, y_key, z_key) -> Path:
     records, json_path = load_records(Path(path_file))
-    outpng = json_path.with_suffix(".png")
-    x_key = "net_expenditure"
-    y_key = "avg_service_time"
-    z_key = "total_requests"
-    x_values = [float(row[x_key]) for row in records]
-    y_values = [float(row[y_key]) for row in records]
-    z_values = [float(row[z_key]) for row in records]
+    outpng = json_path.with_name("3d_" + json_path.stem).with_suffix(".png")
 
     fig = plt.figure(figsize=(11, 8))
     ax = fig.add_subplot(111, projection="3d")
-
-    # add_surface(ax, x_values, y_values, z_values)
-    add_scatter(ax, records, 
-                x_key, y_key, z_key,
-                )
-
-    ax.set_xlabel(x_key)
-    ax.set_ylabel(y_key)
-    ax.set_zlabel(z_key)
-    ax.set_title("Optimal Modes Across Selected Scenarios")
-    ax.legend(title="optimal mode")
+    model_3d(ax, records, x_key, y_key, z_key)
 
     plt.tight_layout()
     plt.savefig(outpng, dpi=600, bbox_inches="tight")
     plt.show()
     #plt.close(fig)
+    return outpng
 
+# 2d scatter plot
+def plts_2d(path_file: Path, x_key, y_key, types: list[str]) -> Path:
+    records, json_path = load_records(Path(path_file))
+    outpng = json_path.with_name("2d_" + json_path.stem).with_suffix(".png")
+
+    fig = plt.figure(figsize=(11, 8))
+    ax = fig.add_subplot(111)
+
+    grouped_records: dict[tuple, list[dict]] = {}
+    for row in records:
+        group_key = tuple(row[type_key] for type_key in types)
+        grouped_records.setdefault(group_key, []).append(row)
+
+    for group_key, group_records in grouped_records.items():
+        x_values = [float(row[x_key]) for row in group_records]
+        y_values = [float(row[y_key]) for row in group_records]
+        scatter_kwargs = {
+            "s": 50,
+            "alpha": 0.85,
+            "label": group_label(types, group_key),
+        }
+
+        if types == ["mode_id"]:
+            mode_id = int(group_key[0])
+            scatter_kwargs["color"] = MODE_COLORS.get(mode_id, "black")
+            scatter_kwargs["label"] = MODE_LABELS.get(mode_id, f"Mode {mode_id}")
+
+        ax.scatter(x_values, y_values, **scatter_kwargs)
+
+    ax.set_xlabel(x_key)
+    ax.set_ylabel(y_key)
+    ax.set_title(f"{y_key} vs {x_key}")
+    ax.grid(True, alpha=0.3)
+    ax.legend(title=", ".join(types))
+
+    plt.tight_layout()
+    plt.savefig(outpng, dpi=600, bbox_inches="tight")
+    plt.show()
+    #plt.close(fig)
     return outpng
 
 
-# optimals.json xyz分别是ht, hs, lambda
-def optimals_3d(path_file: Path):
+# 2x2 subplots
+def plts_4s(path_file: Path,
+            x_key, y_key, z_key) -> Path:
     # ===== 1. 读取 JSON 文件 =====
     records, json_path = load_records(Path(path_file))
-    outpng = Path(json_path).with_suffix(".png")
-    x_key = "ht"
-    y_key = "hs"
-    z_key = "lambda"
-    # 为避免同一场景的点完全重叠，给不同 mode 一个很小的偏移
-    offsets = {
-        1: (-0.03, -0.03, -0.8),
-        2: (-0.03,  0.03, -0.3),
-        3: ( 0.03, -0.03,  0.3),
-        4: ( 0.03,  0.03,  0.8),
-    }
+    outpng = Path(json_path).with_name("4s_" + json_path.stem).with_suffix(".png")
+
+
 
     # ===== 3. 创建 2x2 图 =====
     fig = plt.figure(figsize=(14, 10))
@@ -78,24 +95,18 @@ def optimals_3d(path_file: Path):
     ax_xz = fig.add_subplot(223)
     ax_yz = fig.add_subplot(224)
 
-    ax_3d = add_scatter(ax_3d, records, 
-                x_key, y_key, z_key,
-                offsets,
-                )
+    ax_3d = model_3d(ax_3d, records, x_key, y_key, z_key)
     ax_xy = add_projections(ax_xy, records, 
                  x_key, y_key, z_key,
                  'xy',
-                 offsets,
                  )
     ax_xz = add_projections(ax_xz, records, 
                  x_key, y_key, z_key,
                  'xz',
-                 offsets,
                  )
     ax_yz = add_projections(ax_yz, records, 
                  x_key, y_key, z_key,
                  'yz',
-                 offsets,
                  )    
 
     # ===== 4. 坐标轴和标题 =====
@@ -103,17 +114,7 @@ def optimals_3d(path_file: Path):
     y_min, y_max = -0.08, 1.05
     z_min, z_max = 18, 62
 
-    # 3D
-    ax_3d.set_xlim(x_min, x_max)
-    ax_3d.set_ylim(y_min, y_max)
-    ax_3d.set_zlim(z_min, z_max)
-    ax_3d.set_xticks([0.0, 0.5, 1.0])
-    ax_3d.set_yticks([0.0, 0.5, 1.0])
-    ax_3d.set_zticks([20, 40, 60])
-    ax_3d.set_xlabel("temporal")
-    ax_3d.set_ylabel("spatial")
-    ax_3d.set_zlabel("lambda")
-    ax_3d.set_title("3D Scatter Plot of Scenarios by Mode ID")
+    #2x2定位
     ax_3d.view_init(elev=24, azim=-58)
 
     # XY
@@ -153,28 +154,31 @@ def optimals_3d(path_file: Path):
     plt.tight_layout()
 
     plt.savefig(outpng, dpi=600, bbox_inches="tight")
-    plt.show(block = False)
-    plt.pause(0.1)  # 确保图像显示出来
+    plt.show()
+    # plt.pause(0.1)  # 确保图像显示出来
     #plt.close(fig)
+    return outpng
 
+# 3d scatter plot
+def model_3d(ax, records, x_key, y_key, z_key):
+    # 为避免同一场景的点完全重叠，给不同 mode 一个很小的偏移
+    offsets = {
+        1: (-0.03, -0.03, -0.8),
+        2: (-0.03,  0.03, -0.3),
+        3: ( 0.03, -0.03,  0.3),
+        4: ( 0.03,  0.03,  0.8),
+    }
+    add_scatter(ax, records, 
+                x_key, y_key, z_key,
+                offsets,
+                )
 
-
-def load_records(path_file: Path) -> tuple[list[dict], Path]:
-    results_path = Path(path_file)
-    if not results_path.exists():
-        raise FileNotFoundError(
-            "file not found. Run the scenario export first, "
-            "then rerun test.py."
-        )
-
-    with results_path.open("r", encoding="utf-8") as handle:
-        records = json.load(handle)
-
-    if not records:
-        raise ValueError("optimal_modes() returned an empty result set.")
-
-    return records, results_path
-
+    ax.set_xlabel(x_key)
+    ax.set_ylabel(y_key)
+    ax.set_zlabel(z_key)
+    ax.set_title("Optimal Modes Across Selected Scenarios")
+    ax.legend(title="optimal mode")
+    return ax
 
 def add_surface(ax, x_values: list[float], y_values: list[float], z_values: list[float]) -> bool:
     if len(x_values) < 3:
@@ -269,4 +273,24 @@ def add_projections(ax, records: list[dict],
         )
     return ax
 
+def group_label(types: list[str], group_key: tuple) -> str:
+    return ", ".join(
+        f"{type_key}={type_value}"
+        for type_key, type_value in zip(types, group_key)
+    )
 
+def load_records(path_file: Path) -> tuple[list[dict], Path]:
+    results_path = Path(path_file)
+    if not results_path.exists():
+        raise FileNotFoundError(
+            "file not found. Run the scenario export first, "
+            "then rerun test.py."
+        )
+
+    with results_path.open("r", encoding="utf-8") as handle:
+        records = json.load(handle)
+
+    if not records:
+        raise ValueError("optimal_modes() returned an empty result set.")
+
+    return records, results_path
