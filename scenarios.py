@@ -6,6 +6,7 @@ from itertools import product
 from datetime import datetime
 from demand_generation import generate_requests
 import mode_set
+
 from mode_set import (
     RESULT_COLUMNS, # column names for the results DataFrame
     build_grid_graph,
@@ -14,28 +15,46 @@ from mode_set import (
     evaluate_mode_3,
     evaluate_mode_4,
 )
+import demand_generation as dg
 
-def build_scenario_frame(lda: list, hs: list, ht: list,
+
+def build_scenarios(lda: list, hs: list, ht: list,
                          run_seed: int | None = None, 
                          ) -> pd.DataFrame:
     if run_seed is None:
         run_seed = random.randint(0, 10**9)
 
     rows = []
-    for index, (lda, hs, ht) in enumerate(
+    for index, (lda_value, hs_value, ht_value) in enumerate(
         product(lda, hs, ht),
         start=1,
     ):
         rows.append(
             {
-                "scenario_id": f"S{index:02d}_l{lda}_hs{hs:.1f}_ht{ht:.1f}",
-                "lambda": int(lda),
-                "hs": float(hs),
-                "ht": float(ht),
+                "scenario_id": f"S{index:02d}_l{lda_value}_hs{hs_value:.1f}_ht{ht_value:.1f}",
+                "lambda": int(lda_value),
+                "hs": float(hs_value),
+                "ht": float(ht_value),
                 "seed": run_seed + index - 1,
             }
         )
     return pd.DataFrame(rows)
+
+
+def _request_file_name(scenario: dict) -> str:
+    return (
+        f"lambda{scenario['lambda']:g}"
+        f"_hs{scenario['hs']:g}"
+        f"_ht{scenario['ht']:g}"
+        f"_seed{scenario['seed']}.json"
+    )
+
+
+def _load_replicated_requests(scenario: dict, replication_dir: Path) -> list:
+    request_path = replication_dir / _request_file_name(scenario)
+    if not request_path.exists():
+        raise FileNotFoundError(f"Replication request file not found: {request_path}")
+    return dg.load_requests(request_path)
 
 '''
 def _benchmark_mode_infeasible_result(
@@ -112,32 +131,42 @@ def demand_scenarios(
     hs,
     ht,
     seed,
+    output_dir: Path,
+    replication: bool = False,
     service_policy: str = "strict",
 ) -> pd.DataFrame:
     graph = build_grid_graph(size)
-    scenario_frame = build_scenario_frame(lda, hs, ht, seed)
+    scenario_frame = build_scenarios(lda, hs, ht, seed)
     result_rows = []
+    replication_dir = output_dir / "re_demand"
+
+    if replication and not replication_dir.exists():
+        raise FileNotFoundError(f"Replication directory not found: {replication_dir}")
 
     for scenario in scenario_frame.to_dict(orient="records"):
-        requests = generate_requests(
-            lambda_value=float(scenario["lambda"]),
-            hs=float(scenario["hs"]),
-            ht=float(scenario["ht"]),
-            seed=int(scenario["seed"]),
-            grid_size=size,
-            horizon=span,
-        )
+        if replication:
+            requests = _load_replicated_requests(scenario, replication_dir)
+        else:
+            requests = generate_requests(
+                lambda_value = float(scenario["lambda"]),
+                hs = float(scenario["hs"]),
+                ht = float(scenario["ht"]),
+                seed = int(scenario["seed"]),
+                grid_size = size,
+                horizon = span,
+            )
+            dg.save_requests(requests, output_dir, _request_file_name(scenario))
 
         result_rows.extend(
-            evaluate_all(
+            evaluate_all(   #一次添加4个mode的结果
                 requests,
                 scenario,
                 graph,
-                service_policy=service_policy,
+                service_policy = service_policy,
             )
         )
 
-    return pd.DataFrame(result_rows, columns=RESULT_COLUMNS)
+    return requests, pd.DataFrame(result_rows, columns=RESULT_COLUMNS)
 
 
 def cost_scenarios(

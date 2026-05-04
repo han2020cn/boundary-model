@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import pandas as pd
 # from mpl_toolkits.mplot3d import Axes3D
 
 # ===== 2. 为不同 mode_id 定义颜色 =====
@@ -30,20 +31,81 @@ def plts_3d(path_file: Path,
     fig = plt.figure(figsize=(11, 8))
     ax = fig.add_subplot(111, projection="3d")
     model_3d(ax, records, x_key, y_key, z_key)
+    ax.legend(
+        title="mode_id",
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        borderaxespad=0.0,
+    )
 
-    plt.tight_layout()
+    plt.tight_layout(rect=(0.0, 0.0, 0.78, 1.0))
     plt.savefig(outpng, dpi=600, bbox_inches="tight")
     plt.show()
     #plt.close(fig)
     return outpng
 
 # 2d scatter plot
-def plts_2d(path_file: Path, x_key, y_key, types: list[str]) -> Path:
-    records, json_path = load_records(Path(path_file))
-    outpng = json_path.with_name("2d_" + json_path.stem).with_suffix(".png")
+def plts_2d(frame: pd.DataFrame, output_path: Path, x_key, y_key, types: list[str]) -> Path:
+    outpng = Path(output_path)
+    outpng.parent.mkdir(parents=True, exist_ok=True)
 
     fig = plt.figure(figsize=(11, 8))
     ax = fig.add_subplot(111)
+    _draw_2d_scatter(ax, frame, x_key, y_key, types, "x-y scatter plot", show_legend=True)
+
+    plt.tight_layout(rect=(0.0, 0.0, 0.84, 1.0))
+    plt.savefig(outpng, dpi=600, bbox_inches="tight")
+    plt.show()
+    #plt.close(fig)
+    return outpng
+
+
+def plts_2d_pair(
+    left_frame: pd.DataFrame,
+    right_frame: pd.DataFrame,
+    output_path: Path,
+    x_key,
+    x1_key,
+    y_key,
+    y1_key,
+    types: list[str],
+    left_title: str,
+    right_title: str,
+) -> Path:
+    outpng = Path(output_path)
+    outpng.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7), sharex=False, sharey=False)
+    _draw_2d_scatter(axes[0], left_frame, x_key, y_key, types, left_title, show_legend=False)
+    _draw_2d_scatter(axes[1], right_frame, x1_key, y1_key, types, right_title, show_legend=False)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        title=", ".join(types),
+        loc="center left",
+        bbox_to_anchor=(0.9, 0.5),
+        borderaxespad=0.0,
+    )
+
+    plt.tight_layout(rect=(0.0, 0.0, 0.88, 1.0))
+    plt.savefig(outpng, dpi=600, bbox_inches="tight")
+    plt.show()
+    #plt.close(fig)
+    return outpng
+
+
+def _draw_2d_scatter(
+    ax,
+    frame: pd.DataFrame,
+    x_key,
+    y_key,
+    types: list[str],
+    title: str,
+    show_legend: bool,
+) -> None:
+    records = frame.to_dict(orient="records")
 
     grouped_records: dict[tuple, list[dict]] = {}
     for row in records:
@@ -68,15 +130,16 @@ def plts_2d(path_file: Path, x_key, y_key, types: list[str]) -> Path:
 
     ax.set_xlabel(x_key)
     ax.set_ylabel(y_key)
-    ax.set_title(f"{y_key} vs {x_key}")
+    ax.set_title(title)
     ax.grid(True, alpha=0.3)
-    ax.legend(title=", ".join(types))
 
-    plt.tight_layout()
-    plt.savefig(outpng, dpi=600, bbox_inches="tight")
-    plt.show()
-    #plt.close(fig)
-    return outpng
+    if show_legend:
+        ax.legend(
+            title=", ".join(types),
+            loc="lower left",
+            bbox_to_anchor=(1.02, 0.0),
+            borderaxespad=0.0,
+        )
 
 
 # 2x2 subplots
@@ -149,9 +212,17 @@ def plts_4s(path_file: Path,
 
     # ===== 5. 图例 =====
     handles, labels = ax_3d.get_legend_handles_labels()
-    fig.legend(handles, labels, title="mode_id", loc="upper center", ncol=4)
+    fig.legend(
+        handles,
+        labels,
+        title="mode_id",
+        loc="center left",
+        bbox_to_anchor=(0.86, 0.5),
+        ncol=1,
+        borderaxespad=0.0,
+    )
 
-    plt.tight_layout()
+    plt.tight_layout(rect=(0.0, 0.0, 0.82, 1.0))
 
     plt.savefig(outpng, dpi=600, bbox_inches="tight")
     plt.show()
@@ -177,7 +248,6 @@ def model_3d(ax, records, x_key, y_key, z_key):
     ax.set_ylabel(y_key)
     ax.set_zlabel(z_key)
     ax.set_title("Optimal Modes Across Selected Scenarios")
-    ax.legend(title="optimal mode")
     return ax
 
 def add_surface(ax, x_values: list[float], y_values: list[float], z_values: list[float]) -> bool:

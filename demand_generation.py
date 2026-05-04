@@ -1,8 +1,10 @@
 from __future__ import annotations
-
+import json
 from dataclasses import dataclass
 
 import numpy as np
+from pathlib import Path
+
 
 GridNode = tuple[int, int] # 定义一个type，表示网格中的一个节点（x, y）
 
@@ -105,3 +107,41 @@ def generate_requests(
         )
 
     return sorted(requests, key=lambda request: (request.departure_time, request.request_id))
+
+def request_to_record(request: TripRequest) -> dict:
+    return {
+        "request_id": request.request_id,
+        "origin": list(request.origin),
+        "destination": list(request.destination),
+        "departure_time": request.departure_time,
+    }
+
+
+def save_requests(
+    requests: list[TripRequest],
+    output_dir: Path,
+    file_name: str = "requests.json",
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / file_name
+    records = [request_to_record(request) for request in requests]
+
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(records, handle, ensure_ascii=False, indent=2)
+
+    return output_path
+
+
+def load_requests(path: Path) -> list[TripRequest]:
+    with path.open("r", encoding="utf-8") as handle:
+        records = json.load(handle)
+
+    return [
+        TripRequest(
+            request_id=int(record["request_id"]),
+            origin=tuple(record["origin"]),
+            destination=tuple(record["destination"]),
+            departure_time=int(record["departure_time"]),
+        )
+        for record in records
+    ]

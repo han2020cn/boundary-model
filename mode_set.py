@@ -128,21 +128,21 @@ def build_grid_graph(grid_size: int) -> nx.Graph:
 def manhattan_distance(
     a: GridNode,
     b: GridNode,
-    graph: nx.Graph | None = None,
+    net_graph: nx.Graph | None = None,
 ) -> int:
-    if graph is None:
+    if net_graph is None:
         return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
-    distance_cache = graph.graph.get(DISTANCE_CACHE_KEY)
+    distance_cache = net_graph.graph.get(DISTANCE_CACHE_KEY)
     if distance_cache is None:
         distance_cache = {
             source: dict(lengths)
             for source, lengths in nx.all_pairs_dijkstra_path_length(
-                graph,
+                net_graph,
                 weight="weight",
             )
         }
-        graph.graph[DISTANCE_CACHE_KEY] = distance_cache
+        net_graph.graph[DISTANCE_CACHE_KEY] = distance_cache
 
     return int(distance_cache[a][b])
 

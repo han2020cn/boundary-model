@@ -5,22 +5,41 @@ from pathlib import Path
 import scenarios as sc
 import plt_draw as plt
 
+
 BASE_SEED = 20260402
 GRID_SIZE = 10
 HORIZON = 180 # 时间范围 / 仿真时域（time horizon / simulation horizon）
-LAMBDA_LEVELS = tuple(range(20, 61, 10)) # 需求强度或到达率（demand intensity / arrival rate）
-HS_LEVELS = tuple(0.5) # 空间异质性（spatial heterogeneity）
-HT_LEVELS = tuple(0.5) # 时间异质性（temporal heterogeneity）i/10 for i in range(0, 11)
+LAMBDA_LEVELS = tuple(range(1, 101, 5)) # 需求强度或到达率（demand intensity / arrival rate）
+HS_LEVELS = (0.5,) # 空间异质性（spatial heterogeneity）
+HT_LEVELS = (0.5,) # 时间异质性（temporal heterog.eneity）tuple(i/10 for i in range(0, 11))
 SERVICE_POLICY = "strict"
+REPLICATION = True #是否复现
 # scenarios_num= len(LAMBDA_LEVELS) * len(HS_LEVELS) * len(HT_LEVELS)
 
 
+def extend_json_records(frame: pd.DataFrame, output_path: Path) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        with output_path.open("r", encoding="utf-8") as handle:
+            records = json.load(handle)
+    else:
+        records = []
 
-def main(scene: int) -> pd.DataFrame:
+    records.extend(json.loads(frame.to_json(orient="records")))
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(records, handle, ensure_ascii=False, indent=2)
+
+    return output_path
+
+
+
+def main(scene: int, output_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, Path, Path]:
     if scene == 1:
-        results_frame = sc.demand_scenarios(GRID_SIZE, HORIZON, 
+        requests, results_frame = sc.demand_scenarios(GRID_SIZE, HORIZON, 
                                      LAMBDA_LEVELS, HS_LEVELS, HT_LEVELS,
                                      BASE_SEED,
+                                     output_dir,
+                                     replication=REPLICATION,
                                      service_policy=SERVICE_POLICY,
                                      )
         sc_type = "demand"
@@ -37,21 +56,18 @@ def main(scene: int) -> pd.DataFrame:
                                      service_policy=SERVICE_POLICY,
                                      )
         sc_type = "cost"
-    output_dir = Path("/home/han/from-codex/boundary-model/rs")
-    res_type = "rs"
-    results_path = sc.export_files(results_frame, output_dir,sc_type,res_type)
-    print(f"JSON path: {results_path}")
+    
     optimals_frame = sc.optimals(results_frame)
-    res_type = "ops"
-    optimals_path = sc.export_files(optimals_frame, output_dir, sc_type,res_type)
-    print(f"JSON path: {optimals_path}")
-    x = "lambda"
-    y = "net_expenditure"
-    z = "lambda"
-    types = ["mode_id"]
-    plt.plts_2d(results_path, x, y, types) #画图
-    #plts_3d xyz图, plts_2d xy图, plts_4s 2x2图
-    # return json_path
+
+    if REPLICATION:
+        results_path = extend_json_records(results_frame, output_dir / "com_results.json")
+        optimals_path = extend_json_records(optimals_frame, output_dir / "com_optimals.json")
+    else:
+        results_path = sc.export_files(results_frame, output_dir, sc_type, "rs")
+        optimals_path = sc.export_files(optimals_frame, output_dir, sc_type, "ops")
+    # print(f"JSON path: {optimals_path}")
+
+    return results_frame, optimals_frame, results_path, optimals_path
 
 # json to excel: convert files
 def json_to_excel(file_path: Path) -> Path:
@@ -64,5 +80,25 @@ def json_to_excel(file_path: Path) -> Path:
     
 
 if __name__ == "__main__":
-    main(1)
-        
+    output_dir = Path("/home/han/from-codex/boundary-model/rs")
+    results_frame, optimals_frame, rs_path, optimals_path = main(1, output_dir)
+
+    x = "served_requests"
+    x1 = "served_requests"
+    y = "net_expenditure"
+    y1 = "avg_service_time"
+    z = "lambda"
+    types = ["mode_id"]
+    plt.plts_2d_pair(
+        results_frame,
+        results_frame,
+        output_dir / "2d_pairs.png",
+        x,
+        x1,
+        y,
+        y1,
+        types,
+        left_title=y,
+        right_title=y1,
+    ) #画图
+    #plts_3d xyz图, plts_2d xy图, plts_4s 2x2图
