@@ -111,10 +111,11 @@ def demand_scenarios(
     lda,
     hs,
     ht,
+    seed,
     service_policy: str = "strict",
 ) -> pd.DataFrame:
     graph = build_grid_graph(size)
-    scenario_frame = build_scenario_frame(lda=lda, hs=hs, ht=ht)
+    scenario_frame = build_scenario_frame(lda, hs, ht, seed)
     result_rows = []
 
     for scenario in scenario_frame.to_dict(orient="records"):
@@ -204,13 +205,13 @@ def cost_scenarios(
     return results_frame
 
 
-def results_export(results_frame: pd.DataFrame, output_dir: Path) ->  Path:
+def export_files(_frame: pd.DataFrame, output_dir: Path,scenario_type: str,results_type: str) ->  Path:
     #output_dir.mkdir(parents=True, exist_ok=True)
     #csv_path = output_dir / "scenario_results.csv"
     #results_frame.to_csv(csv_path, index=False)
-    date = datetime.now().strftime("%Y%m%d_%H%M%S")
-    json_path = output_dir / f"results_{date}.json"
-    json_records = json.loads(results_frame.to_json(orient="records"))
+    date = datetime.now().strftime("%y%m%d_%H%M")
+    json_path = output_dir / f"{scenario_type}_{results_type}_{date}.json"
+    json_records = json.loads(_frame.to_json(orient="records"))
     with json_path.open("w", encoding="utf-8") as handle:
         json.dump(json_records, handle, ensure_ascii=False, indent=2)
 
@@ -219,21 +220,18 @@ def results_export(results_frame: pd.DataFrame, output_dir: Path) ->  Path:
 '''
 选出每个 scenario 的 optimal
 '''
-def optimals(json_path: Path):
+def optimals(results_frame: pd.DataFrame):
     # 读取结果
-    df = pd.read_json(json_path)
+    df = results_frame
     
     # 只保留可行方案
-    feasible_df = df[df["feasible"] == True].copy()
+    # feasible_df = df[df["feasible"] == True].copy()
 
     # 先按 scenario_id 分组，再按 unserved_requests、avg_service_time、net_expenditure 排序
-    feasible_df = feasible_df.sort_values(
+    df = df.sort_values(
         by=["scenario_id", "unserved_requests", "avg_service_time", "net_expenditure"]
     )
 
     # 每个 scenario 取第一条 = optimal mode
-    optimal_df = feasible_df.groupby("scenario_id", as_index=False).first()
-    date = datetime.now().strftime("%Y%m%d_%H%M%S")
-    jsonpath_opt = json_path.with_name(f"optimals_{date}.json")
-    optimal_df.to_json(jsonpath_opt, orient="records", force_ascii=False, indent=2)
-    return str(jsonpath_opt)
+    optimal_df = df.groupby("scenario_id", as_index=False).first()
+    return optimal_df
