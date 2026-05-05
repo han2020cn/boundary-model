@@ -13,6 +13,7 @@ LAMBDA_LEVELS = tuple(range(1, 101, 5)) # 需求强度或到达率（demand inte
 HS_LEVELS = (0.5,) # 空间异质性（spatial heterogeneity）
 HT_LEVELS = (0.5,) # 时间异质性（temporal heterog.eneity）tuple(i/10 for i in range(0, 11))
 SERVICE_POLICY = "strict"
+PREBOOKING_ALPHA = 0.5 # prebooking rate
 REPLICATION = True #是否复现
 # scenarios_num= len(LAMBDA_LEVELS) * len(HS_LEVELS) * len(HT_LEVELS)
 
@@ -41,6 +42,7 @@ def main(scene: int, output_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, Path
                                      output_dir,
                                      replication=REPLICATION,
                                      service_policy=SERVICE_POLICY,
+                                     prebooking_alpha=PREBOOKING_ALPHA,
                                      )
         sc_type = "demand"
 
@@ -54,6 +56,7 @@ def main(scene: int, output_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, Path
                                      fleet_sizes, capacities, 
                                      seed_count, BASE_SEED,
                                      service_policy=SERVICE_POLICY,
+                                     prebooking_alpha=PREBOOKING_ALPHA,
                                      )
         sc_type = "cost"
     
@@ -80,7 +83,7 @@ def json_to_excel(file_path: Path) -> Path:
     
 
 if __name__ == "__main__":
-    output_dir = Path("/home/han/from-codex/boundary-model/rs")
+    output_dir = Path(__file__).resolve().parent / "rs"
     results_frame, optimals_frame, rs_path, optimals_path = main(1, output_dir)
 
     x = "served_requests"
@@ -89,10 +92,11 @@ if __name__ == "__main__":
     y1 = "avg_service_time"
     z = "lambda"
     types = ["mode_id"]
+    plt.plts_2d(results_frame,output_dir,y,y1,types)
     plt.plts_2d_pair(
         results_frame,
         results_frame,
-        output_dir / "2d_pairs.png",
+        output_dir,
         x,
         x1,
         y,
@@ -100,5 +104,6 @@ if __name__ == "__main__":
         types,
         left_title=y,
         right_title=y1,
+        prebooking_alpha=PREBOOKING_ALPHA,
     ) #画图
     #plts_3d xyz图, plts_2d xy图, plts_4s 2x2图

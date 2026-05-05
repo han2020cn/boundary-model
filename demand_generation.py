@@ -1,6 +1,6 @@
 from __future__ import annotations
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from pathlib import Path
@@ -15,6 +15,7 @@ class TripRequest:
     origin: GridNode
     destination: GridNode
     departure_time: int
+    request_type: str = "real_time"
 
 
 def _build_grid_nodes(grid_size: int) -> list[GridNode]:
@@ -108,12 +109,34 @@ def generate_requests(
 
     return sorted(requests, key=lambda request: (request.departure_time, request.request_id))
 
+
+def assign_request_types(
+    requests: list[TripRequest],
+    alpha: float,
+    seed: int | None,
+) -> list[TripRequest]:
+    prebooking_count = int(np.floor(float(np.clip(alpha, 0.0, 1.0)) * len(requests)))
+    if prebooking_count <= 0:
+        return [replace(request, request_type="real_time") for request in requests]
+
+    rng = np.random.default_rng(seed)
+    prebooking_indices = set(
+        int(index)
+        for index in rng.choice(len(requests), size=prebooking_count, replace=False)
+    )
+    typed_requests = []
+    for index, request in enumerate(requests):
+        request_type = "pre_booking" if index in prebooking_indices else "real_time"
+        typed_requests.append(replace(request, request_type=request_type))
+    return typed_requests
+
 def request_to_record(request: TripRequest) -> dict:
     return {
         "request_id": request.request_id,
         "origin": list(request.origin),
         "destination": list(request.destination),
         "departure_time": request.departure_time,
+        "request_type": request.request_type,
     }
 
 
@@ -142,6 +165,7 @@ def load_requests(path: Path) -> list[TripRequest]:
             origin=tuple(record["origin"]),
             destination=tuple(record["destination"]),
             departure_time=int(record["departure_time"]),
+            request_type=str(record.get("request_type", "real_time")),
         )
         for record in records
     ]

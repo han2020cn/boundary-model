@@ -431,13 +431,14 @@ def evaluate_mode_2( # 评估偏离路线模式 deviated route
 
     service_policy = _validate_service_policy(service_policy)
     acc = _init_mode_accumulator()
+    prebooking_requests, realtime_requests = _partition_requests_by_type(requests)
     loop = _build_loop_context(graph)
     candidate_locations = _build_mode_2_locations(loop)
     loads: defaultdict[tuple[int, int, int], int] = defaultdict(int)
     vehicle_completion = {vehicle_id: 0.0 for vehicle_id in range(FLEET_SIZE)}
     vehicle_delay = {vehicle_id: 0 for vehicle_id in range(FLEET_SIZE)}
-    #对每个request循环
-    for request in _sorted_requests(requests):
+
+    def insert_request(request: TripRequest) -> bool:
         candidates: list[dict[str, Any]] = []
 
         for boarding_location in candidate_locations:
@@ -533,18 +534,7 @@ def evaluate_mode_2( # 评估偏离路线模式 deviated route
         )
 
         if best_choice is None:
-            if service_policy == "skip":
-                continue
-
-            return _finalize_nonbaseline_mode(
-                mode_id=2,
-                scenario=scenario,
-                requests=requests,
-                benchmark_expenditure=benchmark_expenditure,
-                acc=acc,
-                feasible=False,
-                feasibility_reason="capacity_limit",
-            )
+            return False
 
         _reserve_loop_capacity(
             loads,
@@ -566,6 +556,22 @@ def evaluate_mode_2( # 评估偏离路线模式 deviated route
             float(best_choice["candidate_travel_distance"]),
             int(best_choice["candidate_departures"]),
         )
+        return True
+
+    for request in prebooking_requests:
+        if not insert_request(request):
+            return _finalize_nonbaseline_mode(
+                mode_id=2,
+                scenario=scenario,
+                requests=requests,
+                benchmark_expenditure=benchmark_expenditure,
+                acc=acc,
+                feasible=False,
+                feasibility_reason="prebooking_insertion_failed",
+            )
+
+    for request in realtime_requests:
+        insert_request(request)
 
     return _finalize_nonbaseline_mode(
         mode_id=2,
@@ -574,11 +580,7 @@ def evaluate_mode_2( # 评估偏离路线模式 deviated route
         benchmark_expenditure=benchmark_expenditure,
         acc=acc,
         feasible=True,
-        feasibility_reason=_mode_result_reason(
-            acc.served_requests,
-            len(requests),
-            service_policy,
-        ),
+        feasibility_reason=_request_type_mode_reason(acc.served_requests, len(requests)),
     )
 
 
@@ -592,6 +594,7 @@ def evaluate_mode_3( # 评估动态路线模式 DRT rolling horizon **lookahead 
 
     service_policy = _validate_service_policy(service_policy)
     acc = _init_mode_accumulator()
+    prebooking_requests, realtime_requests = _partition_requests_by_type(requests)
     vehicle_states: dict[int, DrtVehicleState] = {
         vehicle_id: DrtVehicleState() for vehicle_id in range(FLEET_SIZE)
     }
@@ -602,9 +605,9 @@ def evaluate_mode_3( # 评估动态路线模式 DRT rolling horizon **lookahead 
     skipped_request_ids: set[int] = set()
     lookahead = 20 # 滚动规划的时间窗口大小 (rolling horizon lookahead), 每次规划时只考虑在当前时间加上lookahead内的请求
     step = 10
-    max_departure = max((request.departure_time for request in requests), default=0)
+    max_departure = max((request.departure_time for request in realtime_requests), default=0)
     planning_time = 0 # 从0开始的滚动规划时间, 每次循环增加step，直到超过max_departure + lookahead或者所有请求都被安排
-    sorted_requests = _sorted_requests(requests)
+    sorted_realtime_requests = _sorted_requests(realtime_requests)
 
     def sync_accumulator() -> None:
         totals = _drt_state_totals(vehicle_states)
@@ -618,16 +621,145 @@ def evaluate_mode_3( # 评估动态路线模式 DRT rolling horizon **lookahead 
             int(totals["departures"]),
         )
 
+    def insert_request(request: TripRequest) -> bool:
+        current_totals = _drt_state_totals(vehicle_states)
+        current_total_service = current_totals["wait"] + current_totals["onboard"]
+        candidates: list[dict[str, Any]] = []
+        for vehicle_id, state in vehicle_states.items():
+            schedule = state.pending_events
+            current_pending_wait = _sum_evaluation_metric(
+                state.pending_evaluation,
+                "wait",
+            )
+            current_pending_onboard = _sum_evaluation_metric(
+                state.pending_evaluation,
+                "onboard",
+            )
+            current_pending_travel = float(state.pending_evaluation["active_travel"])
+            pickup_event = DrtEvent(request=request, event_type="pickup")
+            dropoff_event = DrtEvent(request=request, event_type="dropoff")
+            for pickup_position in range(len(schedule) + 1):
+                schedule_with_pickup = (
+                    schedule[:pickup_position]
+                    + [pickup_event]
+                    + schedule[pickup_position:]
+                )
+                for dropoff_position in range(
+                    pickup_position + 1,
+                    len(schedule_with_pickup) + 1,
+                ):
+                    candidate_schedule = (
+                        schedule_with_pickup[:dropoff_position]
+                        + [dropoff_event]
+                        + schedule_with_pickup[dropoff_position:]
+                    )
+                    candidate_evaluation = _evaluate_drt_event_schedule(
+                        candidate_schedule,
+                        graph,
+                        start_time=state.current_time,
+                        start_location=state.current_location,
+                        onboard_requests=state.onboard_requests,
+                        onboard_pickup_times=state.onboard_pickup_times,
+                    )
+                    candidate_pending_wait = _sum_evaluation_metric(
+                        candidate_evaluation,
+                        "wait",
+                    )
+                    candidate_pending_onboard = _sum_evaluation_metric(
+                        candidate_evaluation,
+                        "onboard",
+                    )
+                    candidate_total_service = (
+                        current_total_service
+                        - current_pending_wait
+                        - current_pending_onboard
+                        + candidate_pending_wait
+                        + candidate_pending_onboard
+                    )
+                    candidate_total_wait = (
+                        current_totals["wait"]
+                        - current_pending_wait
+                        + candidate_pending_wait
+                    )
+                    candidate_total_travel = (
+                        current_totals["travel_distance"]
+                        - current_pending_travel
+                        + float(candidate_evaluation["active_travel"])
+                    )
+                    candidate_departures = int(
+                        current_totals["departures"] + int(not state.has_departed)
+                    )
+                    candidate_expenditure = _calculate_net_expenditure(
+                        candidate_total_travel,
+                        candidate_departures,
+                        len(scheduled_request_ids) + 1,
+                    )
+
+                    ranking = (
+                        candidate_total_service,
+                        candidate_total_wait,
+                        candidate_expenditure,
+                        vehicle_id,
+                        pickup_position,
+                        dropoff_position,
+                    )
+                    candidates.append(
+                        {
+                            "vehicle_id": vehicle_id,
+                            "schedule": candidate_schedule,
+                            "evaluation": candidate_evaluation,
+                            "candidate_departures": candidate_departures,
+                            "candidate_expenditure": candidate_expenditure,
+                            "ranking": ranking,
+                        }
+                    )
+
+        best_insertion, _ = _minimize_candidate(
+            candidates,
+            (_build_drt_capacity_constraint(),),
+        )
+
+        if best_insertion is None:
+            return False
+
+        vehicle_id = int(best_insertion["vehicle_id"])
+        vehicle_states[vehicle_id].pending_events = list(best_insertion["schedule"])
+        vehicle_states[vehicle_id].pending_evaluation = dict(best_insertion["evaluation"])
+        vehicle_states[vehicle_id].has_departed = True
+        scheduled_request_ids.add(request.request_id)
+        return True
+
+    def processed_realtime_count() -> int:
+        return sum(
+            1
+            for request in realtime_requests
+            if request.request_id in scheduled_request_ids
+            or request.request_id in skipped_request_ids
+        )
+
+    for request in prebooking_requests:
+        if not insert_request(request):
+            sync_accumulator()
+            return _finalize_nonbaseline_mode(
+                mode_id=3,
+                scenario=scenario,
+                requests=requests,
+                benchmark_expenditure=benchmark_expenditure,
+                acc=acc,
+                feasible=False,
+                feasibility_reason="prebooking_insertion_failed",
+            )
+
     while (
         planning_time <= max_departure + lookahead
-        and len(scheduled_request_ids) + len(skipped_request_ids) < len(requests)
+        and processed_realtime_count() < len(realtime_requests)
     ):
         for state in vehicle_states.values():
             _advance_drt_vehicle_state(state, planning_time, graph)
 
         visible_requests = [
             request
-            for request in sorted_requests
+            for request in sorted_realtime_requests
             if request.request_id not in scheduled_request_ids
             and request.request_id not in skipped_request_ids
             and request.departure_time <= planning_time + lookahead
@@ -637,149 +769,18 @@ def evaluate_mode_3( # 评估动态路线模式 DRT rolling horizon **lookahead 
             if request.request_id in scheduled_request_ids:
                 continue
 
-            current_totals = _drt_state_totals(vehicle_states)
-            current_total_service = current_totals["wait"] + current_totals["onboard"]
-            candidates: list[dict[str, Any]] = []
-            for vehicle_id, state in vehicle_states.items():
-                schedule = state.pending_events
-                current_pending_wait = _sum_evaluation_metric(
-                    state.pending_evaluation,
-                    "wait",
-                )
-                current_pending_onboard = _sum_evaluation_metric(
-                    state.pending_evaluation,
-                    "onboard",
-                )
-                current_pending_travel = float(state.pending_evaluation["active_travel"])
-                pickup_event = DrtEvent(request=request, event_type="pickup")
-                dropoff_event = DrtEvent(request=request, event_type="dropoff")
-                for pickup_position in range(len(schedule) + 1):
-                    schedule_with_pickup = (
-                        schedule[:pickup_position]
-                        + [pickup_event]
-                        + schedule[pickup_position:]
-                    )
-                    for dropoff_position in range(
-                        pickup_position + 1,
-                        len(schedule_with_pickup) + 1,
-                    ):
-                        candidate_schedule = (
-                            schedule_with_pickup[:dropoff_position]
-                            + [dropoff_event]
-                            + schedule_with_pickup[dropoff_position:]
-                        )
-                        candidate_evaluation = _evaluate_drt_event_schedule(
-                            candidate_schedule,
-                            graph,
-                            start_time=state.current_time,
-                            start_location=state.current_location,
-                            onboard_requests=state.onboard_requests,
-                            onboard_pickup_times=state.onboard_pickup_times,
-                        )
-                        candidate_pending_wait = _sum_evaluation_metric(
-                            candidate_evaluation,
-                            "wait",
-                        )
-                        candidate_pending_onboard = _sum_evaluation_metric(
-                            candidate_evaluation,
-                            "onboard",
-                        )
-                        candidate_total_service = (
-                            current_total_service
-                            - current_pending_wait
-                            - current_pending_onboard
-                            + candidate_pending_wait
-                            + candidate_pending_onboard
-                        )
-                        candidate_total_wait = (
-                            current_totals["wait"]
-                            - current_pending_wait
-                            + candidate_pending_wait
-                        )
-                        candidate_total_travel = (
-                            current_totals["travel_distance"]
-                            - current_pending_travel
-                            + float(candidate_evaluation["active_travel"])
-                        )
-                        candidate_departures = int(
-                            current_totals["departures"] + int(not state.has_departed)
-                        )
-                        candidate_expenditure = _calculate_net_expenditure(
-                            candidate_total_travel,
-                            candidate_departures,
-                            len(scheduled_request_ids) + 1,
-                        )
-
-                        ranking = (
-                            candidate_total_service,
-                            candidate_total_wait,
-                            candidate_expenditure,
-                            vehicle_id,
-                            pickup_position,
-                            dropoff_position,
-                        )
-                        candidates.append(
-                            {
-                                "vehicle_id": vehicle_id,
-                                "schedule": candidate_schedule,
-                                "evaluation": candidate_evaluation,
-                                "candidate_departures": candidate_departures,
-                                "candidate_expenditure": candidate_expenditure,
-                                "ranking": ranking,
-                            }
-                        )
-
-            best_insertion, _ = _minimize_candidate(
-                candidates,
-                (_build_drt_capacity_constraint(),),
-            )
-
-            if best_insertion is None: 
+            if not insert_request(request):
                 sync_accumulator()
-                if service_policy == "skip":
-                    skipped_request_ids.add(request.request_id)
-                    continue
-
-                return _finalize_nonbaseline_mode(
-                    mode_id=3,
-                    scenario=scenario,
-                    requests=requests,
-                    benchmark_expenditure=benchmark_expenditure,
-                    acc=acc,
-                    feasible=False,
-                    feasibility_reason="capacity_limit",
-                )
-
-            vehicle_id = int(best_insertion["vehicle_id"])
-            vehicle_states[vehicle_id].pending_events = list(best_insertion["schedule"])
-            vehicle_states[vehicle_id].pending_evaluation = dict(best_insertion["evaluation"])
-            vehicle_states[vehicle_id].has_departed = True
-            scheduled_request_ids.add(request.request_id)
+                skipped_request_ids.add(request.request_id)
 
         planning_time += step
 
-    if len(scheduled_request_ids) + len(skipped_request_ids) != len(requests):
-        sync_accumulator()
-        if service_policy == "skip":
-            return _finalize_nonbaseline_mode(
-                mode_id=3,
-                scenario=scenario,
-                requests=requests,
-                benchmark_expenditure=benchmark_expenditure,
-                acc=acc,
-                feasible=True,
-                feasibility_reason="partial_service",
-            )
-
-        return _finalize_nonbaseline_mode(
-            mode_id=3,
-            scenario=scenario,
-            requests=requests,
-            benchmark_expenditure=benchmark_expenditure,
-            acc=acc,
-            feasible=False,
-            feasibility_reason="unassigned_requests",
-        )
+    for request in realtime_requests:
+        if (
+            request.request_id not in scheduled_request_ids
+            and request.request_id not in skipped_request_ids
+        ):
+            skipped_request_ids.add(request.request_id)
 
     sync_accumulator()
     return _finalize_nonbaseline_mode(
@@ -789,11 +790,7 @@ def evaluate_mode_3( # 评估动态路线模式 DRT rolling horizon **lookahead 
         benchmark_expenditure=benchmark_expenditure,
         acc=acc,
         feasible=True,
-        feasibility_reason=_mode_result_reason(
-            acc.served_requests,
-            len(requests),
-            service_policy,
-        ),
+        feasibility_reason=_request_type_mode_reason(acc.served_requests, len(requests)),
     )
 
 
@@ -807,13 +804,14 @@ def evaluate_mode_4( # 评估枢纽辐射模式 hub-and-spoke
 
     service_policy = _validate_service_policy(service_policy)
     acc = _init_mode_accumulator()
+    prebooking_requests, realtime_requests = _partition_requests_by_type(requests)
     spoke_paths = _build_spoke_paths(graph)
     spoke_stops = _build_spoke_stop_list(spoke_paths)
     dispatches = _build_spoke_dispatches()
     loads: defaultdict[tuple[int, GridNode, GridNode, int], int] = defaultdict(int)
     used_cycles: set[tuple[int, int]] = set()
-    #对每个request循环
-    for request in _sorted_requests(requests):
+
+    def insert_request(request: TripRequest) -> bool:
         origin_stop = _nearest_spoke_stop(request.origin, spoke_stops, graph)
         destination_stop = _nearest_spoke_stop(request.destination, spoke_stops, graph)
         walk_time = float(
@@ -829,18 +827,7 @@ def evaluate_mode_4( # 评估枢纽辐射模式 hub-and-spoke
             loads,
         )
         if inbound_leg is None:
-            if service_policy == "skip":
-                continue
-
-            return _finalize_nonbaseline_mode(
-                mode_id=4,
-                scenario=scenario,
-                requests=requests,
-                benchmark_expenditure=benchmark_expenditure,
-                acc=acc,
-                feasible=False,
-                feasibility_reason="capacity_limit",
-            )
+            return False
         #
         outbound_leg = _select_outbound_leg(
             destination_stop,
@@ -850,18 +837,7 @@ def evaluate_mode_4( # 评估枢纽辐射模式 hub-and-spoke
             loads,
         )
         if outbound_leg is None:
-            if service_policy == "skip":
-                continue
-
-            return _finalize_nonbaseline_mode(
-                mode_id=4,
-                scenario=scenario,
-                requests=requests,
-                benchmark_expenditure=benchmark_expenditure,
-                acc=acc,
-                feasible=False,
-                feasibility_reason="capacity_limit",
-            )
+            return False
 
         candidate_cycles = {
             tuple(leg["departure_key"])
@@ -897,6 +873,22 @@ def evaluate_mode_4( # 评估枢纽辐射模式 hub-and-spoke
             candidate_travel_distance,
             candidate_departures,
         )
+        return True
+
+    for request in prebooking_requests:
+        if not insert_request(request):
+            return _finalize_nonbaseline_mode(
+                mode_id=4,
+                scenario=scenario,
+                requests=requests,
+                benchmark_expenditure=benchmark_expenditure,
+                acc=acc,
+                feasible=False,
+                feasibility_reason="prebooking_insertion_failed",
+            )
+
+    for request in realtime_requests:
+        insert_request(request)
 
     return _finalize_nonbaseline_mode(
         mode_id=4,
@@ -905,16 +897,31 @@ def evaluate_mode_4( # 评估枢纽辐射模式 hub-and-spoke
         benchmark_expenditure=benchmark_expenditure,
         acc=acc,
         feasible=True,
-        feasibility_reason=_mode_result_reason(
-            acc.served_requests,
-            len(requests),
-            service_policy,
-        ),
+        feasibility_reason=_request_type_mode_reason(acc.served_requests, len(requests)),
     )
 
 
 def _sorted_requests(requests: list[TripRequest]) -> list[TripRequest]:
     return sorted(requests, key=lambda request: (request.departure_time, request.request_id))
+
+
+def _partition_requests_by_type(
+    requests: list[TripRequest],
+) -> tuple[list[TripRequest], list[TripRequest]]:
+    prebooking_requests: list[TripRequest] = []
+    realtime_requests: list[TripRequest] = []
+    for request in _sorted_requests(requests):
+        if request.request_type == "pre_booking":
+            prebooking_requests.append(request)
+        else:
+            realtime_requests.append(request)
+    return prebooking_requests, realtime_requests
+
+
+def _request_type_mode_reason(served_requests: int, total_requests: int) -> str:
+    if served_requests < total_requests:
+        return "partial_service"
+    return "feasible"
 
 
 def _expand_route(
