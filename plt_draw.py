@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import pandas as pd
 # from mpl_toolkits.mplot3d import Axes3D
 
@@ -63,7 +65,7 @@ def plts_2d(frame: pd.DataFrame, output_path: Path, x_key, y_key, types: list[st
 def plts_2d_pair(
     left_frame: pd.DataFrame,
     right_frame: pd.DataFrame,
-    output_path: Path,
+    output_dir: Path,
     x_key,
     x1_key,
     y_key,
@@ -71,15 +73,21 @@ def plts_2d_pair(
     types: list[str],
     left_title: str,
     right_title: str,
+    prebooking_alpha: float | None = None,
 ) -> Path:
-    outpng = Path(output_path)
+    outpng = Path(output_dir) / f"2d_pairs_{datetime.now().strftime('%m%d_%H%M%S')}.png"
     outpng.parent.mkdir(parents=True, exist_ok=True)
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 7), sharex=False, sharey=False)
     _draw_2d_scatter(axes[0], left_frame, x_key, y_key, types, left_title, show_legend=False)
     _draw_2d_scatter(axes[1], right_frame, x1_key, y1_key, types, right_title, show_legend=False)
+    _draw_unserved_portion_lines(axes[1], right_frame, x1_key)
 
     handles, labels = axes[0].get_legend_handles_labels()
+    if prebooking_alpha is not None:
+        handles.append(Line2D([], [], linestyle="none"))
+        labels.append(f"prebooking-alpha = {prebooking_alpha:g}")
+
     fig.legend(
         handles,
         labels,
@@ -94,6 +102,37 @@ def plts_2d_pair(
     plt.show()
     #plt.close(fig)
     return outpng
+
+
+def _draw_unserved_portion_lines(ax, frame: pd.DataFrame, x_key) -> None:
+    portion_ax = ax.twinx()
+    grouped_records: dict[int, list[dict]] = {}
+
+    for row in frame.to_dict(orient="records"):
+        mode_id = int(row["mode_id"])
+        grouped_records.setdefault(mode_id, []).append(row)
+
+    for mode_id, group_records in grouped_records.items():
+        sorted_records = sorted(group_records, key=lambda row: float(row[x_key]))
+        x_values = [float(row[x_key]) for row in sorted_records]
+        y_values = []
+        for row in sorted_records:
+            total_requests = float(row["total_requests"])
+            unserved_requests = float(row["unserved_requests"])
+            portion = 0.0 if total_requests == 0.0 else unserved_requests / total_requests
+            y_values.append(portion)
+
+        portion_ax.plot(
+            x_values,
+            y_values,
+            color=MODE_COLORS.get(mode_id, "black"),
+            linewidth=1.8,
+            alpha=0.9,
+            label="_nolegend_",
+        )
+
+    portion_ax.set_ylabel("unserved portion of all requests")
+    portion_ax.set_ylim(bottom=0.0)
 
 
 def _draw_2d_scatter(

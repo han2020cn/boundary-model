@@ -124,6 +124,21 @@ def evaluate_all(
     return result_rows
 
 
+def _assign_scenario_request_types(
+    requests: list,
+    scenario: dict,
+    prebooking_alpha: float,
+    *,
+    fixed_seed: bool = True,
+) -> list:
+    request_type_seed = int(scenario["seed"]) if fixed_seed else None
+    return dg.assign_request_types(
+        requests,
+        alpha=prebooking_alpha,
+        seed=request_type_seed,
+    )
+
+
 def demand_scenarios(
     size,
     span,
@@ -134,6 +149,7 @@ def demand_scenarios(
     output_dir: Path,
     replication: bool = False,
     service_policy: str = "strict",
+    prebooking_alpha: float = 0.0,
 ) -> pd.DataFrame:
     graph = build_grid_graph(size)
     scenario_frame = build_scenarios(lda, hs, ht, seed)
@@ -155,6 +171,13 @@ def demand_scenarios(
                 grid_size = size,
                 horizon = span,
             )
+        requests = _assign_scenario_request_types(
+            requests,
+            scenario,
+            prebooking_alpha,
+            fixed_seed=not replication,
+        )
+        if not replication:
             dg.save_requests(requests, output_dir, _request_file_name(scenario))
 
         result_rows.extend(
@@ -180,6 +203,7 @@ def cost_scenarios(
         seed_count: int,
         base_seed: int,
         service_policy: str = "strict",
+        prebooking_alpha: float = 0.0,
         ) -> tuple[pd.DataFrame, Path]:
     graph = build_grid_graph(grid_size)
     result_rows = []
@@ -194,6 +218,11 @@ def cost_scenarios(
             seed=int(seed),
             grid_size=grid_size,
             horizon=horizon,
+        )
+        requests = _assign_scenario_request_types(
+            requests,
+            {"seed": int(seed)},
+            prebooking_alpha,
         )
 
         for fleet_size, capacity in product(fleet_sizes, capacities):
