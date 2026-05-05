@@ -48,7 +48,7 @@ def plts_3d(path_file: Path,
 
 # 2d scatter plot
 def plts_2d(frame: pd.DataFrame, output_path: Path, x_key, y_key, types: list[str]) -> Path:
-    outpng = Path(output_path)
+    outpng = Path(output_path)/"2d_plots.png"
     outpng.parent.mkdir(parents=True, exist_ok=True)
 
     fig = plt.figure(figsize=(11, 8))
