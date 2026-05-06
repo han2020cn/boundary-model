@@ -7,26 +7,54 @@ from datetime import datetime
 from demand_generation import generate_requests
 import mode_set
 
+import netx as net
+
 from mode_set import (
-    RESULT_COLUMNS, # column names for the results DataFrame
-    build_grid_graph,
-    evaluate_mode_1,
-    evaluate_mode_2,
-    evaluate_mode_3,
-    evaluate_mode_4,
+    evaluate_1,
+    evaluate_2,
+    evaluate_3,
+    evaluate_4,
 )
 import demand_generation as dg
 
+RESULT_COLUMNS = [
+    "scenario_id",
+    "lambda",
+    "hs",
+    "ht",
+    "seed",
+    "mode_id",
+    "mode_name",
+    "feasible",
+    "feasibility_reason",
+    "total_requests",
+    "served_requests",
+    "unserved_requests",
+    "benchmark_expenditure",
+    "net_expenditure", # cost
+    "total_wait",
+    "total_walk",
+    "total_onboard",
+    "total_service_time",
+    "avg_wait",
+    "avg_walk",
+    "avg_onboard",
+    "avg_service_time",
+    "fleet_size",
+    "capacity",
+]
 
-def build_scenarios(lda: list, hs: list, ht: list,
-                         run_seed: int | None = None, 
-                         ) -> pd.DataFrame:
-    if run_seed is None:
-        run_seed = random.randint(0, 10**9)
+
+def build_scenarios(config) -> pd.DataFrame:
+    run_seed = (
+        random.randint(0, 10**9)
+        if config.base_seed is None
+        else int(config.base_seed)
+    )
 
     rows = []
     for index, (lda_value, hs_value, ht_value) in enumerate(
-        product(lda, hs, ht),
+        product(config.lambdas, config.hs, config.ht),
         start=1,
     ):
         rows.append(
@@ -41,6 +69,12 @@ def build_scenarios(lda: list, hs: list, ht: list,
     return pd.DataFrame(rows)
 
 
+def build_fleets(fleet) -> tuple[tuple[int, int], ...]:
+    fleet_sizes = getattr(fleet, "sizes", (fleet.num,))
+    capacities = getattr(fleet, "capacities", (fleet.cap,))
+    return tuple((int(size), int(capacity)) for size, capacity in product(fleet_sizes, capacities))
+
+
 def _request_file_name(scenario: dict) -> str:
     return (
         f"lambda{scenario['lambda']:g}"
@@ -50,12 +84,26 @@ def _request_file_name(scenario: dict) -> str:
     )
 
 
-def _load_replicated_requests(scenario: dict, replication_dir: Path) -> list:
-    request_path = replication_dir / _request_file_name(scenario)
+def _load_replicated_requests(scenario: dict, input_dir: Path) -> list:
+    request_path = input_dir / _request_file_name(scenario)
     if not request_path.exists():
         raise FileNotFoundError(f"Replication request file not found: {request_path}")
+    
     return dg.load_requests(request_path)
 
+def extend_json_records(frame: pd.DataFrame, output_path: Path) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        with output_path.open("r", encoding="utf-8") as handle:
+            records = json.load(handle)
+    else:
+        records = []
+
+    records.extend(json.loads(frame.to_json(orient="records")))
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(records, handle, ensure_ascii=False, indent=2)
+
+    return output_path
 '''
 def _benchmark_mode_infeasible_result(
     mode_id: int,
@@ -77,13 +125,14 @@ def _benchmark_mode_infeasible_result(
     )
 '''
 
+
 def evaluate_all(
     requests: list,
     scenario: dict,
     graph,
     service_policy: str = "strict",
 ) -> list[dict]:
-    mode_1_result = evaluate_mode_1(requests, scenario, graph)
+    mode_1_result = evaluate_1(requests, scenario, graph)
     result_rows = [mode_1_result]
 
     benchmark_expenditure = (
@@ -95,7 +144,7 @@ def evaluate_all(
             print('infeasible')
 
     result_rows.append(
-        evaluate_mode_2(
+        evaluate_2(
             requests,
             scenario,
             graph,
@@ -104,7 +153,7 @@ def evaluate_all(
         )
     )
     result_rows.append(
-        evaluate_mode_3(
+        evaluate_3(
             requests,
             scenario,
             graph,
@@ -113,7 +162,7 @@ def evaluate_all(
         )
     )
     result_rows.append(
-        evaluate_mode_4(
+        evaluate_4(
             requests,
             scenario,
             graph,
@@ -140,52 +189,48 @@ def _assign_scenario_request_types(
 
 
 def demand_scenarios(
-    size,
-    span,
-    lda,
-    hs,
-    ht,
-    seed,
+    config,
+    nets,
+    fleet,
     output_dir: Path,
-    replication: bool = False,
-    service_policy: str = "strict",
-    prebooking_alpha: float = 0.0,
 ) -> pd.DataFrame:
-    graph = build_grid_graph(size)
-    scenario_frame = build_scenarios(lda, hs, ht, seed)
+    mode_set.configure_runtime(config, nets, fleet)
+    grid_graph = net.build_grid_graph(nets.grid)
+    scenario_frame = build_scenarios(config)
     result_rows = []
-    replication_dir = output_dir / "re_demand"
+    input_dir = output_dir / "re_demand"
+    requests = []
 
-    if replication and not replication_dir.exists():
-        raise FileNotFoundError(f"Replication directory not found: {replication_dir}")
+    if config.replication and not input_dir.exists():
+        raise FileNotFoundError(f"Replication directory not found: {input_dir}")
 
     for scenario in scenario_frame.to_dict(orient="records"):
-        if replication:
-            requests = _load_replicated_requests(scenario, replication_dir)
+        if config.replication:
+            requests = _load_replicated_requests(scenario, input_dir)
         else:
             requests = generate_requests(
                 lambda_value = float(scenario["lambda"]),
                 hs = float(scenario["hs"]),
                 ht = float(scenario["ht"]),
                 seed = int(scenario["seed"]),
-                grid_size = size,
-                horizon = span,
+                grid_size = nets.grid,
+                horizon = config.horizon,
             )
         requests = _assign_scenario_request_types(
             requests,
             scenario,
-            prebooking_alpha,
-            fixed_seed=not replication,
+            config.pre_alpha,
+            fixed_seed=not config.replication,
         )
-        if not replication:
+        if not config.replication:
             dg.save_requests(requests, output_dir, _request_file_name(scenario))
 
         result_rows.extend(
             evaluate_all(   #一次添加4个mode的结果
                 requests,
                 scenario,
-                graph,
-                service_policy = service_policy,
+                grid_graph,
+                service_policy = config.service_policy,
             )
         )
 
@@ -193,69 +238,66 @@ def demand_scenarios(
 
 
 def cost_scenarios(
-        lambda_value: float,
-        hs: float,
-        ht: float,
-        grid_size: int,
-        horizon: int,
-        fleet_sizes: tuple[int, ...],
-        capacities: tuple[int, ...],
-        seed_count: int,
-        base_seed: int,
-        service_policy: str = "strict",
-        prebooking_alpha: float = 0.0,
+        config,
+        nets,
+        fleet,
         ) -> tuple[pd.DataFrame, Path]:
-    graph = build_grid_graph(grid_size)
+    mode_set.configure_runtime(config, nets, fleet)
+    graph = net.build_grid_graph(nets.grid)
     result_rows = []
     scenario_index = 1
 
-    for seed_offset in range(seed_count):
-        seed = base_seed + seed_offset
+    lambda_value = int(config.lambdas[0])
+    hs_value = float(config.hs[0])
+    ht_value = float(config.ht[0])
+
+    for seed_offset in range(config.seed_count):
+        seed = config.base_seed + seed_offset
         requests = generate_requests(
             lambda_value=float(lambda_value),
-            hs=float(hs),
-            ht=float(ht),
+            hs=hs_value,
+            ht=ht_value,
             seed=int(seed),
-            grid_size=grid_size,
-            horizon=horizon,
+            grid_size=nets.grid,
+            horizon=config.horizon,
         )
-        requests = _assign_scenario_request_types(
+        requests = _assign_scenario_request_types( #为每个请求分配类型（预订或实时）
             requests,
             {"seed": int(seed)},
-            prebooking_alpha,
+            config.pre_alpha,
         )
 
-        for fleet_size, capacity in product(fleet_sizes, capacities):
+        for fleet_size, capacity in build_fleets(fleet):
             scenario = {
                 "scenario_id": (
                     f"C{scenario_index:03d}_l{lambda_value:g}"
-                    f"_hs{hs:.1f}_ht{ht:.1f}"
+                    f"_hs{hs_value:.1f}_ht{ht_value:.1f}"
                     f"_f{fleet_size}_c{capacity}_seed{seed}"
                 ),
-                "lambda": int(lambda_value),
-                "hs": float(hs),
-                "ht": float(ht),
+                "lambda": lambda_value,
+                "hs": hs_value,
+                "ht": ht_value,
                 "seed": int(seed),
                 "fleet_size": int(fleet_size),
                 "capacity": int(capacity),
             }
 
-            original_fleet_size = mode_set.FLEET_SIZE
-            original_vehicle_capacity = mode_set.VEHICLE_CAPACITY
+            original_fleet_size = fleet.num
+            original_vehicle_capacity = fleet.cap
             try:
-                mode_set.FLEET_SIZE = int(fleet_size)
-                mode_set.VEHICLE_CAPACITY = int(capacity)
+                fleet.num = int(fleet_size)
+                fleet.cap = int(capacity)
                 result_rows.extend(
                     evaluate_all(
                         requests,
                         scenario,
                         graph,
-                        service_policy=service_policy,
+                        service_policy=config.service_policy,
                     )
                 )
             finally:
-                mode_set.FLEET_SIZE = original_fleet_size
-                mode_set.VEHICLE_CAPACITY = original_vehicle_capacity
+                fleet.num = original_fleet_size
+                fleet.cap = original_vehicle_capacity
 
             scenario_index += 1
 
