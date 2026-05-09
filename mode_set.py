@@ -222,6 +222,19 @@ def _build_path_capacity_constraint(
     return constraint
 
 
+def _build_expenditure_constraint(
+    benchmark_expenditure: float | None,
+) -> CandidateConstraint:
+    def constraint(candidate: dict[str, Any]) -> str | None:
+        if benchmark_expenditure is None:
+            return None
+        if float(candidate["candidate_expenditure"]) <= benchmark_expenditure:
+            return None
+        return "benchmark_exceeded"
+
+    return constraint
+
+
 def evaluate_1( # 评估固定路线模式
     requests: list[TripRequest],
     scenario: Scenario,
@@ -440,7 +453,7 @@ def evaluate_2( # 评估偏离路线模式 deviated route
                         - _loop_departure_count(vehicle_completion[vehicle_id], loop.route_length)
                         + _loop_departure_count(candidate_completion, loop.route_length)
                     )
-                    candidate_expenditure = _calculate_net_expenditure(
+                    candidate_expenditure = _calculate_net_expenditure( #计算净支出
                         candidate_travel_distance,
                         candidate_departures,
                         acc.served_requests + 1,
@@ -473,7 +486,10 @@ def evaluate_2( # 评估偏离路线模式 deviated route
 
         best_choice, _ = _minimize_candidate(
             candidates,
-            (_build_loop_capacity_constraint(fleet, loads, loop.route_length),),
+            (
+                _build_loop_capacity_constraint(fleet, loads, loop.route_length),
+                _build_expenditure_constraint(benchmark_expenditure),
+            ),
         )
 
         if best_choice is None:
@@ -668,7 +684,10 @@ def evaluate_3( # 评估动态路线模式 DRT rolling horizon **lookahead = 20*
 
         best_insertion, _ = _minimize_candidate(
             candidates,
-            (drt._build_drt_capacity_constraint(fleet),),
+            (
+                drt._build_drt_capacity_constraint(fleet),
+                _build_expenditure_constraint(benchmark_expenditure),
+            ),
         )
 
         if best_insertion is None:
@@ -805,6 +824,11 @@ def evaluate_4( # 评估枢纽辐射模式 hub-and-spoke
             candidate_departures,
             acc.served_requests + 1,
         )
+        if (
+            benchmark_expenditure is not None
+            and candidate_expenditure > benchmark_expenditure
+        ):
+            return False
 
         for leg in (inbound_leg, outbound_leg):
             if leg.get("vehicle_id") is None:
@@ -1191,12 +1215,7 @@ def _finalize_result(
     feasible: bool, #布尔值，表示方案是否可行
     feasibility_reason: str,
 ) -> dict[str, Any]:
-    denominator = served_requests if served_requests > 0 else 0
     total_service_time = total_wait + total_walk + total_onboard
-    avg_wait = total_wait / denominator if denominator else 0.0
-    avg_walk = total_walk / denominator if denominator else 0.0
-    avg_onboard = total_onboard / denominator if denominator else 0.0
-    avg_service_time = total_service_time / denominator if denominator else 0.0
 
     return {
         "scenario_id": scenario["scenario_id"],
@@ -1207,7 +1226,6 @@ def _finalize_result(
         "fleet_size": int(scenario.get("fleet_size", fleet.num)),
         "capacity": int(scenario.get("capacity", fleet.cap)),
         "mode_id": mode_id,
-        "mode_name": config.modes[mode_id],
         "feasible": bool(feasible),
         "feasibility_reason": feasibility_reason,
         "total_requests": int(total_requests),
@@ -1219,10 +1237,6 @@ def _finalize_result(
         "total_walk": _round_metric(total_walk),
         "total_onboard": _round_metric(total_onboard),
         "total_service_time": _round_metric(total_service_time),
-        "avg_wait": _round_metric(avg_wait),
-        "avg_walk": _round_metric(avg_walk),
-        "avg_onboard": _round_metric(avg_onboard),
-        "avg_service_time": _round_metric(avg_service_time),
     }
 
 

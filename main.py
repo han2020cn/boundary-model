@@ -6,13 +6,14 @@ from typing import Sequence
 from pathlib import Path
 import scenarios as sc
 import plt_draw as plt
+import demand_generation as dg
 
-@dataclass(frozen=True, slots=True)
-class config:
+@dataclass(frozen=True, slots=True)         #Class named in pascal case
+class Config:           
     base_seed: int = 20260402
     seed_count: int = 3
     pre_alpha: float = 0.5 # prebooking rate
-    replication: bool = True #是否复现
+    replication: bool = False #是否复现
     scene: int = 1 # 场景选择：1-需求场景，2-成本场景
 
     span: int = 180 # 时间范围 / 仿真时域（time horizon / simulation horizon）
@@ -29,7 +30,7 @@ class config:
     spoke_order = ("north", "east", "south", "west") # pending
 
 @dataclass(frozen=True, slots=True)
-class nets:
+class Nets:
 
     grid: int = 10
     hub: tuple = (4, 4)
@@ -47,35 +48,39 @@ class nets:
     ring_radii: tuple[float, ...] = (5, 10, 15),
 
 @dataclass(frozen=True, slots=True)
-class fleet:
+class Fleet:
     num = 7
     cap = 30
+    multi_sizes = (3, 6, 9, 12, 15)
+    multi_cap = (15, 30, 45)
 # scenarios_num= len(LAMBDA_LEVELS) * len(HS_LEVELS) * len(HT_LEVELS)
 
-def main(scene: int, output_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, Path, Path]:
-    if scene == 1:
+
+def main(config: Config, output_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, Path, Path]:
+    if config.scene == 1:
+
         requests, results_frame = sc.demand_scenarios(config,nets,fleet,                                                                  
                                      output_dir,
                                      )
-        sc_type = "demand"
+        sc_type = "1"
 
-    if scene == 2:
+
+    if config.scene == 2:
         config.LAMBDA_LEVELS, hs_, ht_ = 40, 0.5, 0.5
-        fleet_sizes = (3, 6, 9, 12, 15)
-        capacities = (15, 30, 45)
-        configseed_count = 5
-        results_frame = sc.cost_scenarios(config, nets,fleet, 
+        config.seed_count = 5
+        results_frame = sc.cost_scenarios(config, nets, fleet, output_dir,
                                      )
-        sc_type = "cost"
+        sc_type = "2"
     
     optimals_frame = sc.optimals(results_frame)
 
-    if config.replication:
+    if config.replication: # 如果是复现模式，直接将结果追加到json文件中，否则导出为新的文件
         results_path = sc.extend_json_records(results_frame, output_dir / "com_results.json")
         optimals_path = sc.extend_json_records(optimals_frame, output_dir / "com_optimals.json")
-    else:
+    else: # 导出新的文件
         results_path = sc.export_files(results_frame, output_dir, sc_type, "rs")
         optimals_path = sc.export_files(optimals_frame, output_dir, sc_type, "ops")
+        dg.save_requests(requests, output_dir, "requests.json")
     # print(f"JSON path: {optimals_path}")
 
     return results_frame, optimals_frame, results_path, optimals_path
@@ -88,11 +93,18 @@ def json_to_excel(file_path: Path) -> Path:
     df = pd.DataFrame(data)
     output_path = file_path.with_suffix(".xlsx")
     df.to_excel(output_path, index=False)
+
+
+
     
 
 if __name__ == "__main__":
+    config = Config()
+    nets = Nets()
+    fleet = Fleet()
     output_dir = Path(__file__).resolve().parent / "rs"
-    results_frame, optimals_frame, rs_path, optimals_path = main(config.scene, output_dir)
+    results_frame, optimals_frame, rs_path, optimals_path = main(config, output_dir)
+    # results_frame = pd.read_json(output_dir / "demand_rs_260508_1147.json")
 
     x = "served_requests"
     x1 = "served_requests"
@@ -100,18 +112,32 @@ if __name__ == "__main__":
     y1 = "avg_service_time"
     z = "lambda"
     types = ["mode_id"] 
-    plt.plts_2d(results_frame,output_dir,y,y1,types)
-    plt.plts_2d_pair(
-        results_frame,
-        results_frame,
-        output_dir,
-        x,
-        x1,
-        y,
-        y1,
-        types,
-        left_title=y,
-        right_title=y1,
-        prebooking_alpha=config.pre_alpha,
-    ) #画图
-    #plts_3d xyz图, plts_2d xy图, plts_4s 2x2图
+    plot_columns = [
+        "mode_id",
+        "served_requests",
+        "net_expenditure",
+        "total_service_time",
+    ]
+
+    a = results_frame[["net_expenditure", "total_service_time"]].copy()
+
+    fr_plot1 = dg.avg_served(results_frame, a, "acceptance") #计算请求的平均值
+
+    # plt.plts_2d(fr_plot1,output_dir,y,y1,types)
+    # plt.plts_2d_pair(   #画图 #plts_3d xyz图, plts_2d xy图, plts_4s 2x2图
+    #     fr_plot1,
+    #     fr_plot1,
+    #     output_dir,
+    #     x,
+    #     x1,
+    #     y,
+    #     y1,
+    #     types,
+    #     left_title=y,
+    #     right_title=y1,
+    #     prebooking_alpha=config.pre_alpha,
+    # ) 
+    
+
+    fr_plot2 = dg.avg_served(results_frame, a, "acceptance") 
+    plt.plts_cost_tradeoff(fr_plot2, output_dir, config = config )

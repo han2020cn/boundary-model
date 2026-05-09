@@ -4,6 +4,10 @@ from pathlib import Path
 
 import networkx as nx
 
+def build_grid_graph(grid_size: int) -> nx.Graph:
+    graph = nx.grid_2d_graph(grid_size, grid_size)
+    nx.set_edge_attributes(graph, 1, "weight")
+    return graph
 
 def build_radial_ring_network(
     spoke_count: int = 8,

@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 from pathlib import Path
-
+import pandas as pd
 
 GridNode = tuple[int, int] # 定义一个type，表示网格中的一个节点（x, y）
 
@@ -34,7 +34,7 @@ def _hotspot_weights(nodes: list[GridNode], hotspot: GridNode) -> np.ndarray: # 
         [abs(node[0] - hotspot[0]) + abs(node[1] - hotspot[1]) for node in nodes],
         dtype=float,
     )
-    return np.exp(-0.6 * distances)
+    return np.exp(-0.3 * distances)
 
 
 def _mix_spatial_weights( # 混合空间权重
@@ -169,3 +169,13 @@ def load_requests(path: Path) -> list[TripRequest]:
         )
         for record in records
     ]
+
+def avg_served(frame: pd.DataFrame, division: pd.DataFrame, ac_rate: str| None = None) -> pd.DataFrame:
+    plot_frame = frame.copy()
+    served_num = plot_frame["served_requests"]
+    plot_frame["avg_net_expenditure"] = (division.iloc[:, 0] / served_num).fillna(0.0)
+    plot_frame["avg_service_time"] = (division.iloc[:, 1] / served_num).fillna(0.0)
+    if ac_rate == "acceptance":
+        plot_frame["acceptance_rate"] = (served_num / plot_frame["total_requests"]).fillna(0.0)
+    else: pass
+    return plot_frame
