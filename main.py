@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json
+
 import pandas as pd
 from dataclasses import dataclass,field
 from typing import Sequence
@@ -7,14 +7,21 @@ from pathlib import Path
 import scenarios as sc
 import plt_draw as plt
 import demand_generation as dg
+import functions as fs
+import netx as net
+
 
 @dataclass(frozen=True, slots=True)         #Class named in pascal case
 class Config:           
     base_seed: int = 20260402
-    seed_count: int = 3
+    seed_count: int = 1
     pre_alpha: float = 0.5 # prebooking rate
     replication: bool = False #是否复现
     scene: int = 1 # 场景选择：1-需求场景，2-成本场景
+    
+    o_hotspot: tuple[int, int] = (2, 2)
+    d_hotspot: tuple[int, int] = (7, 7)
+    peaks: tuple[int, ...] = (45, 120)
 
     span: int = 180 # 时间范围 / 仿真时域（time horizon / simulation horizon）
     lambdas: Sequence[int] = tuple(range(1, 101, 5)) # 需求强度或到达率（demand intensity / arrival rate）
@@ -32,20 +39,66 @@ class Config:
 @dataclass(frozen=True, slots=True)
 class Nets:
 
-    grid: int = 10
-    hub: tuple = (4, 4)
-    fixed_stops: tuple[tuple[int, int], ...] = (
-    (1, 5),
-    (1, 7),
-    (5, 7),
-    (9, 7),
-    (9, 5),
-    (9, 3),
-    (5, 3),
-    (1, 3),
+    network_type: str = "grid" # "grid" or "hub_spoke"
+    grid: int = 10 # 1 miles
+    grid_hub: tuple[int, int] = (4, 4)
+    grid_routes: tuple[tuple[tuple[int, int], ...], ...] = ((
+        (1, 5),
+        (1, 7),
+        (5, 7),
+        (9, 7),
+        (9, 5),
+        (9, 3),
+        (5, 3),
+        (1, 3),
+    ),)
+    hub_spoke_hub: str = "hub"
+    hub_spoke_routes: tuple[tuple[object, ...], ...] = (
+        (
+            (15, 0),
+            (10, 0),
+            (5, 0),
+            "hub",
+            (5, 4),
+            (10, 4),
+            (15, 4),
+        ),
+        (
+            (15, 1),
+            (10, 1),
+            (5, 1),
+            "hub",
+            (5, 5),
+            (10, 5),
+            (15, 5),
+        ),
+        (
+            (15, 2),
+            (10, 2),
+            (5, 2),
+            "hub",
+            (5, 6),
+            (10, 6),
+            (15, 6),
+        ),
+        (
+            (15, 3),
+            (10, 3),
+            (5, 3),
+            "hub",
+            (5, 7),
+            (10, 7),
+            (15, 7),
+        ),
     )
-    spoke_count: int = 8,
-    ring_radii: tuple[float, ...] = (5, 10, 15),
+    spoke_count: int = 8
+    ring_radial: tuple[float, ...] = (5, 10, 15)
+
+    @property
+    def hub(self):
+        if self.network_type == "grid":
+            return self.grid_hub
+        return self.hub_spoke_hub
 
 @dataclass(frozen=True, slots=True)
 class Fleet:
@@ -59,7 +112,7 @@ class Fleet:
 def main(config: Config, output_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, Path, Path]:
     if config.scene == 1:
 
-        requests, results_frame = sc.demand_scenarios(config,nets,fleet,                                                                  
+        requests, results_frame = sc.demand_scenarios(config, nets, fleet,                                                                  
                                      output_dir,
                                      )
         sc_type = "1"
@@ -77,6 +130,7 @@ def main(config: Config, output_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, 
     if config.replication: # 如果是复现模式，直接将结果追加到json文件中，否则导出为新的文件
         results_path = sc.extend_json_records(results_frame, output_dir / "com_results.json")
         optimals_path = sc.extend_json_records(optimals_frame, output_dir / "com_optimals.json")
+        fs.json_to_excel(results_path)
     else: # 导出新的文件
         results_path = sc.export_files(results_frame, output_dir, sc_type, "rs")
         optimals_path = sc.export_files(optimals_frame, output_dir, sc_type, "ops")
@@ -85,14 +139,7 @@ def main(config: Config, output_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, 
 
     return results_frame, optimals_frame, results_path, optimals_path
 
-# json to excel: convert files
-def json_to_excel(file_path: Path) -> Path:
-    with open(file_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
 
-    df = pd.DataFrame(data)
-    output_path = file_path.with_suffix(".xlsx")
-    df.to_excel(output_path, index=False)
 
 
 
@@ -119,24 +166,24 @@ if __name__ == "__main__":
         "total_service_time",
     ]
 
-    a = results_frame[["net_expenditure", "total_service_time"]].copy()
+    a = results_frame[["net_expenditure", "total_service_time"]].copy() # dividend
 
     fr_plot1 = dg.avg_served(results_frame, a, "acceptance") #计算请求的平均值
 
-    # plt.plts_2d(fr_plot1,output_dir,y,y1,types)
-    # plt.plts_2d_pair(   #画图 #plts_3d xyz图, plts_2d xy图, plts_4s 2x2图
-    #     fr_plot1,
-    #     fr_plot1,
-    #     output_dir,
-    #     x,
-    #     x1,
-    #     y,
-    #     y1,
-    #     types,
-    #     left_title=y,
-    #     right_title=y1,
-    #     prebooking_alpha=config.pre_alpha,
-    # ) 
+    plt.plts_2d(fr_plot1,output_dir,y,y1,types)
+    plt.plts_2d_pair(   #画图 #plts_3d xyz图, plts_2d xy图, plts_4s 2x2图
+        fr_plot1,
+        fr_plot1,
+        output_dir,
+        x,
+        x1,
+        y,
+        y1,
+        types,
+        left_title=y,
+        right_title=y1,
+        prebooking_alpha=config.pre_alpha,
+    ) 
     
 
     fr_plot2 = dg.avg_served(results_frame, a, "acceptance") 

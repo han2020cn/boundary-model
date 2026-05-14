@@ -24,6 +24,7 @@ RESULT_COLUMNS = [
     "hs",
     "ht",
     "seed",
+    "replication_id",
     "mode_id",
     "feasible",
     "feasibility_reason",
@@ -49,19 +50,29 @@ def build_scenarios(config) -> pd.DataFrame:
     )
 
     rows = []
-    for index, (lda_value, hs_value, ht_value) in enumerate(
-        product(config.lambdas, config.hs, config.ht),
-        start=1,
-    ):
-        rows.append(
-            {
-                "scenario_id": f"S{index:02d}_l{lda_value}_hs{hs_value:.1f}_ht{ht_value:.1f}",
-                "lambda": int(lda_value),
-                "hs": float(hs_value),
-                "ht": float(ht_value),
-                "seed": run_seed + index - 1,
-            }
-        )
+    scenario_cases = list(product(config.lambdas, config.hs, config.ht))
+    base_scenario_count = len(scenario_cases)
+    seed_count = int(getattr(config, "seed_count", 1))
+    row_index = 1
+    for seed_index in range(seed_count):
+        replication_id = seed_index + 1
+        for index, (lda_value, hs_value, ht_value) in enumerate(scenario_cases):
+            seed = run_seed + seed_index * base_scenario_count + index
+            rows.append(
+                {
+                    "scenario_id": (
+                        f"S{row_index:03d}_r{replication_id:02d}"
+                        f"_l{lda_value}_hs{hs_value:.1f}_ht{ht_value:.1f}"
+                        f"_seed{seed}"
+                    ),
+                    "lambda": int(lda_value),
+                    "hs": float(hs_value),
+                    "ht": float(ht_value),
+                    "seed": seed,
+                    "replication_id": replication_id,
+                }
+            )
+            row_index += 1
     return pd.DataFrame(rows)
 
 
@@ -104,6 +115,23 @@ def _load_replicated_requests(scenario: dict, input_dir: Path) -> list:
         raise FileNotFoundError(f"Replication request file not found: {request_path}")
     
     return dg.load_requests(request_path)
+
+
+def _validate_requests_in_graph(requests: list, graph) -> None:
+    missing = []
+    for request in requests:
+        if request.origin not in graph:
+            missing.append((request.request_id, "origin", request.origin))
+        if request.destination not in graph:
+            missing.append((request.request_id, "destination", request.destination))
+    if missing:
+        details = ", ".join(
+            f"request {request_id} {field}={node!r}"
+            for request_id, field, node in missing[:10]
+        )
+        if len(missing) > 10:
+            details += f", ... {len(missing) - 10} more"
+        raise ValueError(f"requests contain nodes that are not in graph: {details}")
 
 
 '''
@@ -196,14 +224,15 @@ def demand_scenarios(
     fleet,
     output_dir: Path,
 ) -> pd.DataFrame:
-    mode_set.configure_runtime(config, nets, fleet)
-    grid_graph = net.build_grid_graph(nets.grid)
+    network_context = net.build_network_context(nets)
+    mode_set.configure_runtime(config, nets, fleet, network_context)
+    generated_graph = network_context.graph
     scenario_frame = build_scenarios(config)
     result_rows = []
     input_dir = output_dir / "re_demand"
     requests = []
 
-    if config.replication and not input_dir.exists():       # 
+    if config.replication and not input_dir.exists():
         raise FileNotFoundError(f"Replication directory not found: {input_dir}")
 
     for scenario in scenario_frame.to_dict(orient="records"):
@@ -211,13 +240,12 @@ def demand_scenarios(
             requests = _load_replicated_requests(scenario, input_dir)
         else:
             requests = generate_requests(
-                lambda_value = float(scenario["lambda"]),
-                hs = float(scenario["hs"]),
-                ht = float(scenario["ht"]),
-                seed = int(scenario["seed"]),
-                grid_size = nets.grid,
-                horizon = _config_horizon(config),
+                config,
+                nets,
+                scenario,
+                network_context,
             )
+        _validate_requests_in_graph(requests, generated_graph)
         requests = _assign_scenario_request_types(
             requests,
             scenario,
@@ -232,7 +260,7 @@ def demand_scenarios(
             evaluate_all(   #一次添加4个mode的结果
                 requests,
                 scenario,
-                grid_graph,
+                generated_graph,
                 service_policy = config.service_policy,
             )
         )
@@ -246,7 +274,9 @@ def cost_scenarios(
         fleet,
         output_dir: Path,
         ) -> pd.DataFrame:
-    graph = net.build_grid_graph(nets.grid)
+    network_context = net.build_network_context(nets)
+    mode_set.configure_runtime(config, nets, fleet, network_context)
+    generated_graph = network_context.graph
     scenario_frame = build_scenarios(config)
     fleet_frame = build_fleets(fleet)
     result_rows = []
@@ -261,13 +291,12 @@ def cost_scenarios(
             requests = _load_replicated_requests(scenario, input_dir)
         else:
             requests = generate_requests(
-                lambda_value=float(scenario["lambda"]),
-                hs=float(scenario["hs"]),
-                ht=float(scenario["ht"]),
-                seed=int(scenario["seed"]),
-                grid_size=nets.grid,
-                horizon=_config_horizon(config),
+                config,
+                nets,
+                scenario,
+                network_context,
             )
+        _validate_requests_in_graph(requests, generated_graph)
         requests = _assign_scenario_request_types( #为每个请求分配类型（预订或实时）
             requests,
             scenario,
@@ -291,19 +320,19 @@ def cost_scenarios(
             }
 
             runtime_fleet = SimpleNamespace(num=fleet_size, cap=capacity)
-            mode_set.configure_runtime(config, nets, runtime_fleet)
+            mode_set.configure_runtime(config, nets, runtime_fleet, network_context)
             result_rows.extend(
                 evaluate_all(
                     requests,
                     cost_scenario,
-                    graph,
+                    generated_graph,
                     service_policy=config.service_policy,
                 )
             )
 
             scenario_index += 1
 
-    mode_set.configure_runtime(config, nets, fleet)
+    mode_set.configure_runtime(config, nets, fleet, network_context)
     results_frame = pd.DataFrame(result_rows, columns=RESULT_COLUMNS)
     return results_frame
 

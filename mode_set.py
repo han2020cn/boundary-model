@@ -11,23 +11,27 @@ from demand_generation import TripRequest
 
 # parameters
 DISTANCE_CACHE_KEY = "_boundary_model_shortest_path_lengths"
-GridNode = tuple[int, int]
+NetworkNode = Any # type alias: network node（网络节点）
+GridNode = NetworkNode
 Scenario = dict[str, Any]
 CandidateConstraint = Callable[[dict[str, Any]], str | None]
 config: Any | None = None
 nets: Any | None = None
 fleet: Any | None = None
+network_context: Any | None = None
 
 
 def configure_runtime(
     runtime_config: Any,
     runtime_nets: Any,
     runtime_fleet: Any,
+    runtime_network_context: Any | None = None,
 ) -> None:
-    global config, nets, fleet
+    global config, nets, fleet, network_context
     config = runtime_config
     nets = runtime_nets
     fleet = runtime_fleet
+    network_context = runtime_network_context
 
 
 def _require_runtime() -> None:
@@ -37,12 +41,13 @@ def _require_runtime() -> None:
 # loop route for mode 1 and 2
 @dataclass(frozen=True, slots=True)
 class LoopContext:
+    route_id: str
     route_nodes: tuple[GridNode, ...]
     route_length: int
     fixed_stop_indices: dict[GridNode, int]
     optional_stops: tuple[GridNode, ...]
     optional_anchor_indices: dict[GridNode, int]
-    vehicle_offsets: tuple[int, ...]
+    vehicle_offsets: dict[int, int]
 
 # spoke paths for mode 4
 @dataclass(frozen=True, slots=True)
@@ -74,9 +79,9 @@ def manhattan_distance(
     a: GridNode,
     b: GridNode,
     net_graph: nx.Graph | None = None,
-) -> int:
+) -> float:
     if net_graph is None:
-        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+        return float(abs(a[0] - b[0]) + abs(a[1] - b[1]))
 
     distance_cache = net_graph.graph.get(DISTANCE_CACHE_KEY)
     if distance_cache is None:
@@ -89,7 +94,7 @@ def manhattan_distance(
         }
         net_graph.graph[DISTANCE_CACHE_KEY] = distance_cache
 
-    return int(distance_cache[a][b])
+    return float(distance_cache[a][b])
 
 
 def _init_mode_accumulator() -> ModeAccumulator:
@@ -241,7 +246,7 @@ def evaluate_1( # 评估固定路线模式
     graph: nx.Graph,
 ) -> dict[str, Any]:
     _require_runtime()
-    loop = _build_loop_context(nets, fleet, graph)
+    loops = _build_loop_all(graph)
     loads: defaultdict[tuple[int, int, int], int] = defaultdict(int)
     vehicle_completion = {vehicle_id: 0.0 for vehicle_id in range(fleet.num)}
     served_requests = 0
@@ -250,6 +255,7 @@ def evaluate_1( # 评估固定路线模式
     total_onboard = 0.0
     #对每个request循环
     for request in _sorted_requests(requests):
+        loop = _nearest_loop_for_request(request, loops, graph)
         best_choice: dict[str, Any] | None = None
 
         for boarding_stop, boarding_index in loop.fixed_stop_indices.items():
@@ -265,7 +271,7 @@ def evaluate_1( # 评估固定路线模式
                     )
                 )
 
-                for vehicle_id, offset in enumerate(loop.vehicle_offsets):
+                for vehicle_id, offset in loop.vehicle_offsets.items():
                     first_pass = (boarding_index - offset) % loop.route_length
                     boarding_time = _next_cyclic_pass(
                         request.departure_time,
@@ -307,10 +313,7 @@ def evaluate_1( # 评估固定路线模式
 
         if best_choice is None:
             total_travel_distance = float(sum(vehicle_completion.values()))
-            total_departures = sum(
-                _loop_departure_count(completion_time, loop.route_length)
-                for completion_time in vehicle_completion.values()
-            )
+            total_departures = _loop_departures_by_vehicle(vehicle_completion, loops)
             result = _finalize_result(
                 mode_id=1,
                 scenario=scenario,
@@ -350,10 +353,7 @@ def evaluate_1( # 评估固定路线模式
         total_onboard += float(best_choice["onboard_time"])
 
     total_travel_distance = float(sum(vehicle_completion.values()))
-    total_departures = sum(
-        _loop_departure_count(completion_time, loop.route_length)
-        for completion_time in vehicle_completion.values()
-    )
+    total_departures = _loop_departures_by_vehicle(vehicle_completion, loops)
     net_expenditure = _calculate_net_expenditure(
         total_travel_distance,
         total_departures,
@@ -388,14 +388,15 @@ def evaluate_2( # 评估偏离路线模式 deviated route
     service_policy = _validate_service_policy(service_policy)
     acc = _init_mode_accumulator()
     prebooking_requests, realtime_requests = _partition_requests_by_type(requests)
-    loop = _build_loop_context(nets, fleet, graph)
-    candidate_locations = _build_mode_2_locations(loop)
+    loops = _build_loop_all(graph)
     loads: defaultdict[tuple[int, int, int], int] = defaultdict(int)
     vehicle_completion = {vehicle_id: 0.0 for vehicle_id in range(fleet.num)}
     vehicle_delay = {vehicle_id: 0 for vehicle_id in range(fleet.num)}
 
     def insert_request(request: TripRequest) -> bool:
         candidates: list[dict[str, Any]] = []
+        loop = _nearest_loop_for_request(request, loops, graph)
+        candidate_locations = _build_mode_2_locations(loop)
 
         for boarding_location in candidate_locations:
             boarding_node = boarding_location["node"]
@@ -426,7 +427,7 @@ def evaluate_2( # 评估偏离路线模式 deviated route
                     2 if alighting_optional else 0
                 )
 
-                for vehicle_id, offset in enumerate(loop.vehicle_offsets):
+                for vehicle_id, offset in loop.vehicle_offsets.items():
                     delayed_first_pass = (
                         (boarding_anchor - offset) % loop.route_length
                     ) + vehicle_delay[vehicle_id]
@@ -556,7 +557,7 @@ def evaluate_3( # 评估动态路线模式 DRT rolling horizon **lookahead = 20*
     acc = _init_mode_accumulator()
     prebooking_requests, realtime_requests = _partition_requests_by_type(requests)
     vehicle_states: dict[int, drt.DrtVehicleState] = {
-        vehicle_id: drt.DrtVehicleState(current_location=nets.hub)
+        vehicle_id: drt.DrtVehicleState(current_location=_runtime_hub())
         for vehicle_id in range(fleet.num)
     }
     for state in vehicle_states.values():
@@ -565,6 +566,7 @@ def evaluate_3( # 评估动态路线模式 DRT rolling horizon **lookahead = 20*
             graph,
             nets,
             fleet,
+            start_location=_runtime_hub(),
         )
 
     scheduled_request_ids: set[int] = set()
@@ -777,78 +779,115 @@ def evaluate_4( # 评估枢纽辐射模式 hub-and-spoke
     service_policy = _validate_service_policy(service_policy)
     acc = _init_mode_accumulator()
     prebooking_requests, realtime_requests = _partition_requests_by_type(requests)
-    spoke_paths = _build_spoke_paths(nets, graph)
-    spoke_stops = _build_spoke_stop_list(spoke_paths)
-    dispatches = _build_spoke_dispatches(config, fleet)
-    loads: defaultdict[tuple[int, GridNode, GridNode, int], int] = defaultdict(int)
+    loops = _build_loop_all(graph)
+    loads: defaultdict[tuple[int, int, int], int] = defaultdict(int)
     used_cycles: set[tuple[int, int]] = set()
 
     def insert_request(request: TripRequest) -> bool:
-        origin_stop = _nearest_spoke_stop(request.origin, spoke_stops, graph)
-        destination_stop = _nearest_spoke_stop(request.destination, spoke_stops, graph)
-        walk_time = float(
-            manhattan_distance(request.origin, origin_stop, graph)
-            + manhattan_distance(request.destination, destination_stop, graph)
+        loop = _nearest_loop_for_request(request, loops, graph)
+        candidates: list[dict[str, Any]] = []
+
+        for boarding_stop, boarding_index in loop.fixed_stop_indices.items():
+            origin_walk = manhattan_distance(request.origin, boarding_stop, graph)
+            for alighting_stop, alighting_index in loop.fixed_stop_indices.items():
+                destination_walk = manhattan_distance(
+                    request.destination,
+                    alighting_stop,
+                    graph,
+                )
+                walk_time = float(origin_walk + destination_walk)
+                onboard_time = float(
+                    _circular_travel_time(
+                        boarding_index,
+                        alighting_index,
+                        loop.route_length,
+                    )
+                )
+
+                for vehicle_id, offset in loop.vehicle_offsets.items():
+                    first_pass = (boarding_index - offset) % loop.route_length
+                    boarding_time = _next_cyclic_pass(
+                        request.departure_time,
+                        first_pass,
+                        loop.route_length,
+                    )
+                    wait_time = float(boarding_time - request.departure_time)
+                    if not _check_loop_capacity(
+                        fleet,
+                        loads,
+                        vehicle_id,
+                        boarding_time,
+                        boarding_index,
+                        alighting_index,
+                        loop.route_length,
+                    ):
+                        continue
+
+                    cycle_start_time = boarding_time - first_pass
+                    added_cycles = {
+                        (vehicle_id, cycle_start_time)
+                    } - used_cycles
+                    candidate_departures = acc.total_departures + len(added_cycles)
+                    candidate_travel_distance = (
+                        acc.total_travel_distance
+                        + float(loop.route_length * len(added_cycles))
+                    )
+                    candidate_expenditure = _calculate_net_expenditure(
+                        candidate_travel_distance,
+                        candidate_departures,
+                        acc.served_requests + 1,
+                    )
+                    ranking = (
+                        wait_time + walk_time + onboard_time,
+                        wait_time,
+                        walk_time,
+                        onboard_time,
+                        loop.route_id,
+                        vehicle_id,
+                    )
+                    candidates.append(
+                        {
+                            "vehicle_id": vehicle_id,
+                            "boarding_index": boarding_index,
+                            "alighting_index": alighting_index,
+                            "boarding_time": boarding_time,
+                            "wait_time": wait_time,
+                            "walk_time": walk_time,
+                            "onboard_time": onboard_time,
+                            "candidate_departures": candidate_departures,
+                            "candidate_travel_distance": candidate_travel_distance,
+                            "candidate_expenditure": candidate_expenditure,
+                            "added_cycles": added_cycles,
+                            "route_length": loop.route_length,
+                            "ranking": ranking,
+                        }
+                    )
+
+        best_choice, _ = _minimize_candidate(
+            candidates,
+            (_build_expenditure_constraint(benchmark_expenditure),),
         )
-        # 首先尝试origin->destination的单程，如果不行再尝试origin->hub->destination的两程
-        inbound_leg = _select_inbound_leg(
-            origin_stop,
-            request.departure_time,
-            graph,
-            dispatches,
+        if best_choice is None:
+            return False
+
+        _reserve_loop_capacity(
             loads,
+            int(best_choice["vehicle_id"]),
+            int(best_choice["boarding_time"]),
+            int(best_choice["boarding_index"]),
+            int(best_choice["alighting_index"]),
+            int(best_choice["route_length"]),
         )
-        if inbound_leg is None:
-            return False
-        #
-        outbound_leg = _select_outbound_leg(
-            destination_stop,
-            int(inbound_leg["arrival_time"]),
-            graph,
-            dispatches,
-            loads,
-        )
-        if outbound_leg is None:
-            return False
 
-        candidate_cycles = {
-            tuple(leg["departure_key"])
-            for leg in (inbound_leg, outbound_leg)
-            if leg.get("departure_key") is not None
-        }
-        added_cycles = candidate_cycles - used_cycles
-        candidate_departures = acc.total_departures + len(added_cycles)
-        candidate_travel_distance = acc.total_travel_distance + 8.0 * len(added_cycles)
-        candidate_expenditure = _calculate_net_expenditure(
-            candidate_travel_distance,
-            candidate_departures,
-            acc.served_requests + 1,
-        )
-        if (
-            benchmark_expenditure is not None
-            and candidate_expenditure > benchmark_expenditure
-        ):
-            return False
-
-        for leg in (inbound_leg, outbound_leg):
-            if leg.get("vehicle_id") is None:
-                continue
-            _reserve_path_capacity(
-                loads,
-                int(leg["vehicle_id"]),
-                list(leg["path"]),
-                int(leg["start_time"]),
-            )
-
-        used_cycles.update(added_cycles)
+        used_cycles.update(best_choice["added_cycles"])
         acc.served_requests += 1
-        acc.total_wait += float(inbound_leg["wait_time"]) + float(outbound_leg["wait_time"])
-        acc.total_walk += walk_time
-        acc.total_onboard += float(inbound_leg["onboard_time"]) + float(outbound_leg["onboard_time"])
+        acc.total_wait += float(best_choice["wait_time"])
+        acc.total_walk += float(best_choice["walk_time"])
+        acc.total_onboard += float(best_choice["onboard_time"])
         _set_operator_metrics(
             acc,
-            candidate_travel_distance,
-            candidate_departures,
+            float(best_choice["candidate_travel_distance"]),
+            int(best_choice["candidate_departures"]),
         )
         return True
 
@@ -916,15 +955,43 @@ def _expand_route(
     return tuple(route_nodes)
 
 
-def _build_loop_context(nets, fleet, graph: nx.Graph) -> LoopContext:
-    route_nodes = _expand_route(graph, nets.fixed_stops)
+def _node_sort_key(node: GridNode) -> tuple[str, str]:
+    return (type(node).__name__, repr(node))
+
+
+def _runtime_hub() -> GridNode:
+    if network_context is not None:
+        return network_context.hub
+    return nets.hub
+
+
+def _runtime_routes() -> tuple[Any, ...]:
+    if network_context is not None:
+        return network_context.routes
+    return (type("Route", (), {"route_id": "route_1", "stops": tuple(nets.fixed_stops)})(),)
+
+
+def _split_route_vehicle_ids(route_count: int, vehicle_count: int) -> tuple[tuple[int, ...], ...]:
+    base_count, remainder = divmod(vehicle_count, route_count)
+    route_vehicle_ids = []
+    next_vehicle_id = 0
+    for route_index in range(route_count):
+        count = base_count + int(route_index < remainder)
+        ids = tuple(range(next_vehicle_id, next_vehicle_id + count))
+        route_vehicle_ids.append(ids)
+        next_vehicle_id += count
+    return tuple(route_vehicle_ids)
+
+
+def _build_loop_sub(route, route_vehicle_ids: tuple[int, ...], graph: nx.Graph) -> LoopContext:
+    route_nodes = _expand_route(graph, tuple(route.stops))
     route_positions = {node: index for index, node in enumerate(route_nodes[:-1])}
     optional_anchor_indices: dict[GridNode, int] = {}
     route_set = set(route_nodes[:-1])
 
     for node in route_nodes[:-1]:
         anchor_index = route_positions[node]
-        for neighbor in sorted(graph.neighbors(node)):
+        for neighbor in sorted(graph.neighbors(node), key=_node_sort_key):
             if neighbor in route_set:
                 continue
             current_index = optional_anchor_indices.get(neighbor)
@@ -933,12 +1000,61 @@ def _build_loop_context(nets, fleet, graph: nx.Graph) -> LoopContext:
 
     route_length = len(route_nodes) - 1
     return LoopContext(
+        route_id=route.route_id,
         route_nodes=route_nodes,
         route_length=route_length,
-        fixed_stop_indices={stop: route_positions[stop] for stop in nets.fixed_stops},
-        optional_stops=tuple(sorted(optional_anchor_indices)),
+        fixed_stop_indices={stop: route_positions[stop] for stop in route.stops},
+        optional_stops=tuple(sorted(optional_anchor_indices, key=_node_sort_key)),
         optional_anchor_indices=optional_anchor_indices,
-        vehicle_offsets=tuple((vehicle_id * route_length) // fleet.num for vehicle_id in range(fleet.num)),
+        vehicle_offsets={
+            vehicle_id: (offset_index * route_length) // max(1, len(route_vehicle_ids))
+            for offset_index, vehicle_id in enumerate(route_vehicle_ids)
+        },
+    )
+
+
+def _build_loop_all(graph: nx.Graph) -> tuple[LoopContext, ...]:
+    routes = _runtime_routes()
+    route_vehicle_ids = _split_route_vehicle_ids(len(routes), fleet.num)
+    loops = tuple(
+        _build_loop_sub(route, vehicle_ids, graph)
+        for route, vehicle_ids in zip(routes, route_vehicle_ids)
+        if vehicle_ids
+    )
+    if not loops:
+        raise ValueError("fleet must contain at least one vehicle for route service")
+    return loops
+
+
+def _nearest_loop_for_request(
+    request: TripRequest,
+    loops: tuple[LoopContext, ...],
+    graph: nx.Graph,
+) -> LoopContext:
+    def route_distance(loop: LoopContext) -> tuple[float, str]:
+        stops = tuple(loop.fixed_stop_indices)
+        origin_distance = min(manhattan_distance(request.origin, stop, graph) for stop in stops)
+        destination_distance = min(
+            manhattan_distance(request.destination, stop, graph)
+            for stop in stops
+        )
+        return (float(origin_distance + destination_distance), loop.route_id)
+
+    return min(loops, key=route_distance)
+
+
+def _loop_departures_by_vehicle(
+    vehicle_completion: dict[int, float],
+    loops: tuple[LoopContext, ...],
+) -> int:
+    route_length_by_vehicle = {
+        vehicle_id: loop.route_length
+        for loop in loops
+        for vehicle_id in loop.vehicle_offsets
+    }
+    return sum(
+        _loop_departure_count(completion_time, route_length_by_vehicle[vehicle_id])
+        for vehicle_id, completion_time in vehicle_completion.items()
     )
 
 
@@ -1223,6 +1339,7 @@ def _finalize_result(
         "hs": scenario["hs"],
         "ht": scenario["ht"],
         "seed": scenario["seed"],
+        "replication_id": scenario.get("replication_id"),
         "fleet_size": int(scenario.get("fleet_size", fleet.num)),
         "capacity": int(scenario.get("capacity", fleet.cap)),
         "mode_id": mode_id,

@@ -1,25 +1,45 @@
 import math
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Hashable
 
 import networkx as nx
+
+NetworkNode = Hashable
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkRoute:
+    route_id: str
+    stops: tuple[NetworkNode, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkContext:
+    network_type: str
+    graph: nx.Graph
+    hub: NetworkNode
+    routes: tuple[NetworkRoute, ...]
+    request_nodes: tuple[NetworkNode, ...]
+
 
 def build_grid_graph(grid_size: int) -> nx.Graph:
     graph = nx.grid_2d_graph(grid_size, grid_size)
     nx.set_edge_attributes(graph, 1, "weight")
     return graph
 
-def build_radial_ring_network(
+def build_radial_ring_graph(
     spoke_count: int = 8,
-    ring_radii: tuple[float, ...] = (5, 10, 15),
+    ring_radial: tuple[float, ...] = (5, 10, 15),
 ) -> nx.Graph:
     """Build an abstract radial-ring network with weighted spoke and ring edges."""
     if spoke_count < 3:
         raise ValueError("spoke_count must be at least 3")
-    if not ring_radii:
+    if not ring_radial:
         raise ValueError("ring_radii must contain at least one radius")
 
-    radii = tuple(float(radius) for radius in ring_radii)
+    radii = tuple(float(radius) for radius in ring_radial)
     if any(radius <= 0 for radius in radii):
         raise ValueError("all ring radii must be positive")
     if tuple(sorted(radii)) != radii or len(set(radii)) != len(radii):
@@ -70,6 +90,94 @@ def build_radial_ring_network(
     return graph
 
 
+def build_network_context(nets) -> NetworkContext:
+    """Build graph and route configuration from the user-editable Nets class."""
+    network_type = getattr(nets, "network_type", "grid")
+    if network_type == "grid":
+        graph = build_grid_graph(int(nets.grid))
+        hub = getattr(nets, "grid_hub", getattr(nets, "hub", (4, 4)))
+        route_specs = getattr(nets, "grid_routes", None)
+        if route_specs is None:
+            route_specs = (getattr(nets, "fixed_stops"),)
+        request_nodes = tuple(graph.nodes)
+    elif network_type == "hub_spoke":
+        graph = build_radial_ring_graph(nets.spoke_count, nets.ring_radial)
+        hub = getattr(nets, "hub_spoke_hub", getattr(nets, "hub", "hub"))
+        route_specs = getattr(nets, "hub_spoke_routes", None)
+        if route_specs is None:
+            route_specs = _legacy_hub_spoke_routes(nets)
+        allow_hub_requests = bool(getattr(nets, "allow_hub_requests", False))
+        request_nodes = tuple(
+            node for node in graph.nodes if allow_hub_requests or node != hub
+        )
+    else:
+        raise ValueError("network_type must be 'grid' or 'hub_spoke'")
+
+    routes = _build_routes(route_specs)
+    context = NetworkContext(
+        network_type=network_type,
+        graph=graph,
+        hub=hub,
+        routes=routes,
+        request_nodes=tuple(request_nodes),
+    )
+    _validate_network_context(context)
+    return context
+
+
+def _legacy_hub_spoke_routes(nets) -> tuple[tuple[NetworkNode, ...], ...]:
+    routes = []
+    index = 1
+    while hasattr(nets, f"fixed_stops_{index}"):
+        routes.append(tuple(getattr(nets, f"fixed_stops_{index}")))
+        index += 1
+    if not routes:
+        raise ValueError("hub_spoke network requires hub_spoke_routes")
+    return tuple(routes)
+
+
+def _build_routes(route_specs) -> tuple[NetworkRoute, ...]:
+    routes = []
+    for index, route_spec in enumerate(route_specs, start=1):
+        if isinstance(route_spec, NetworkRoute):
+            route = route_spec
+        else:
+            route = NetworkRoute(
+                route_id=f"route_{index}",
+                stops=tuple(route_spec),
+            )
+        if len(route.stops) < 2:
+            raise ValueError(f"{route.route_id} must contain at least two stops")
+        routes.append(route)
+    if not routes:
+        raise ValueError("network context requires at least one route")
+    return tuple(routes)
+
+
+def _validate_network_context(context: NetworkContext) -> None:
+    missing = []
+    if context.hub not in context.graph:
+        missing.append(("hub", context.hub))
+
+    for route in context.routes:
+        for stop in route.stops:
+            if stop not in context.graph:
+                missing.append((route.route_id, stop))
+
+    for node in context.request_nodes:
+        if node not in context.graph:
+            missing.append(("request_nodes", node))
+
+    if missing:
+        details = ", ".join(f"{owner}: {node!r}" for owner, node in missing[:10])
+        if len(missing) > 10:
+            details += f", ... {len(missing) - 10} more"
+        raise ValueError(
+            f"{context.network_type} network contains nodes that are not in graph: "
+            f"{details}"
+        )
+
+
 def print_network_summary(graph: nx.Graph) -> None:
     """Print a readable summary of a radial-ring network."""
     edge_kind_counts = Counter(
@@ -105,6 +213,55 @@ def print_network_summary(graph: nx.Graph) -> None:
             f"kind={kind}, "
             f"weight={_format_number(weight)}"
         )
+
+
+def print_graph_contents(
+    graph: nx.Graph,
+    name: str = "graph",
+    max_items: int | None = None,
+) -> None:
+    """Print graph type, nodes, edges, and stored attributes."""
+    print(f"{name}:")
+    print(f"  type: {type(graph).__name__}")
+    print(f"  nodes: {graph.number_of_nodes()}")
+    print(f"  edges: {graph.number_of_edges()}")
+    print(f"  connected: {nx.is_connected(graph)}")
+
+    node_items = list(graph.nodes(data=True))
+    edge_items = list(graph.edges(data=True))
+    if max_items is not None:
+        node_items = node_items[:max_items]
+        edge_items = edge_items[:max_items]
+
+    print("  node data:")
+    for node, data in node_items:
+        print(f"    {node}: {data}")
+    if max_items is not None and graph.number_of_nodes() > max_items:
+        print(f"    ... {graph.number_of_nodes() - max_items} more nodes")
+
+    print("  edge data:")
+    for source, target, data in edge_items:
+        print(f"    {source} -- {target}: {data}")
+    if max_items is not None and graph.number_of_edges() > max_items:
+        print(f"    ... {graph.number_of_edges() - max_items} more edges")
+
+
+def print_grid_and_radial_ring_graphs(net, choice
+
+) -> None:
+    """Build and print both supported graph structures."""
+    if choice == 'radial' :
+        radial_ring_graph = build_radial_ring_graph(net.spoke_count, net.ring_radial)
+        print_graph_contents(radial_ring_graph, "radial-ring graph")
+        print()
+    else:
+        grid_graph = build_grid_graph(net.grid)
+        radial_ring_graph = build_radial_ring_graph(net.spoke_count, net.ring_radial)
+        print_graph_contents(grid_graph, "grid graph")
+        print()
+    
+
+
 
 
 def plot_radial_ring_network(
@@ -254,7 +411,7 @@ def _single_node_sort_key(node: object) -> tuple[float, int]:
 
 
 if __name__ == "__main__":
-    radial_ring = build_radial_ring_network()
+    radial_ring = build_radial_ring_graph()
     hub_to_outer = nx.shortest_path_length(
         radial_ring,
         "hub",

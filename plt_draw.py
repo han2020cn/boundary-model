@@ -318,8 +318,8 @@ def plts_cost_tradeoff(
         fleet_markers,
     )
 
-    ax.set_xlabel("Operator Unit Cost (€/passenger)")
-    ax.set_ylabel("Passenger Unit Cost (€/passenger)")
+    ax.set_xlabel("Operator Unit Cost (£/pax)")
+    ax.set_ylabel("Passenger Unit Cost (£/pax)")
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout(rect=(0.0, 0.0, 0.78, 1.0))
