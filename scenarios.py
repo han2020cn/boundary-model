@@ -11,10 +11,10 @@ import mode_set
 import netx as net
 
 from mode_set import (
-    evaluate_1,
-    evaluate_2,
-    evaluate_3,
-    evaluate_4,
+    _evaluate_1,
+    _evaluate_2,
+    _evaluate_3,
+    _evaluate_4,
 )
 import demand_generation as dg
 
@@ -162,7 +162,7 @@ def evaluate_all(
     graph,
     service_policy: str = "strict",
 ) -> list[dict]:
-    mode_1_result = evaluate_1(requests, scenario, graph)
+    mode_1_result = _evaluate_1(requests, scenario, graph)
     result_rows = [mode_1_result]
 
     benchmark_expenditure = (
@@ -174,7 +174,7 @@ def evaluate_all(
             print('infeasible')
 
     result_rows.append(
-        evaluate_2(
+        _evaluate_2(
             requests,
             scenario,
             graph,
@@ -183,7 +183,7 @@ def evaluate_all(
         )
     )
     result_rows.append(
-        evaluate_3(
+        _evaluate_3(
             requests,
             scenario,
             graph,
@@ -192,7 +192,7 @@ def evaluate_all(
         )
     )
     result_rows.append(
-        evaluate_4(
+        _evaluate_4(
             requests,
             scenario,
             graph,

@@ -8,7 +8,8 @@ import networkx as nx
 from demand_generation import TripRequest
 
 
-GridNode = tuple[int, int]
+NetworkNode = Any # type alias: network node（网络节点）
+GridNode = NetworkNode
 CandidateConstraint = Callable[[dict[str, Any]], str | None]
 DISTANCE_CACHE_KEY = "_boundary_model_shortest_path_lengths"
 
@@ -17,9 +18,9 @@ def manhattan_distance(
     a: GridNode,
     b: GridNode,
     net_graph: nx.Graph | None = None,
-) -> int:
+) -> float:
     if net_graph is None:
-        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+        return float(abs(a[0] - b[0]) + abs(a[1] - b[1]))
 
     distance_cache = net_graph.graph.get(DISTANCE_CACHE_KEY)
     if distance_cache is None:
@@ -32,7 +33,7 @@ def manhattan_distance(
         }
         net_graph.graph[DISTANCE_CACHE_KEY] = distance_cache
 
-    return int(distance_cache[a][b])
+    return float(distance_cache[a][b])
 
 
 @dataclass(frozen=True, slots=True)

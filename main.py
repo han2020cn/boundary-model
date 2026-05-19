@@ -18,13 +18,13 @@ class Config:
     pre_alpha: float = 0.5 # prebooking rate
     replication: bool = False #是否复现
     scene: int = 1 # 场景选择：1-需求场景，2-成本场景
-    
     o_hotspot: tuple[int, int] = (2, 2)
     d_hotspot: tuple[int, int] = (7, 7)
-    peaks: tuple[int, ...] = (45, 120)
+    peaks: tuple[int, ...] = (120, 600)
+    peak_width_minutes: int = 30 # Gaussian peak width（高斯峰宽）
 
-    span: int = 180 # 时间范围 / 仿真时域（time horizon / simulation horizon）
-    lambdas: Sequence[int] = tuple(range(1, 101, 5)) # 需求强度或到达率（demand intensity / arrival rate）
+    span: int = 720 # 时间范围 / 仿真时域（time horizon / simulation horizon）
+    lambdas: Sequence[int] = tuple(range(10, 500, 20)) # hourly demand intensity（每小时需求强度）
     hs: tuple[float] = (0.5,) # 空间异质性（spatial heterogeneity）
     ht: tuple[float] = (0.5,) # 时间异质性（temporal heterog.eneity）tuple(i/10 for i in range(0, 11))
     service_policy: str = "strict"  #strict/skip
@@ -34,14 +34,17 @@ class Config:
     3: "drt_rolling_horizon",
     4: "hub_and_spoke",
     }
+    max_dev: float = 0.5
     spoke_order = ("north", "east", "south", "west") # pending
 
 @dataclass(frozen=True, slots=True)
 class Nets:
 
     network_type: str = "grid" # "grid" or "hub_spoke"
-    grid: int = 10 # 1 miles
+    grid: int = 10 # size
+    grid_len: int = 1 # 1 miles
     grid_hub: tuple[int, int] = (4, 4)
+    # max_dev: float = 0.5
     grid_routes: tuple[tuple[tuple[int, int], ...], ...] = ((
         (1, 5),
         (1, 7),
@@ -102,10 +105,10 @@ class Nets:
 
 @dataclass(frozen=True, slots=True)
 class Fleet:
-    num = 7
-    cap = 30
-    multi_sizes = (3, 6, 9, 12, 15)
-    multi_cap = (15, 30, 45)
+    num: int
+    cap: int
+    multi_sizes: tuple[int, ...] = (3, 6, 9, 12, 15)
+    multi_cap: tuple[int, ...] = (15, 30, 45)
 # scenarios_num= len(LAMBDA_LEVELS) * len(HS_LEVELS) * len(HT_LEVELS)
 
 
@@ -140,15 +143,10 @@ def main(config: Config, output_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, 
     return results_frame, optimals_frame, results_path, optimals_path
 
 
-
-
-
-    
-
 if __name__ == "__main__":
     config = Config()
     nets = Nets()
-    fleet = Fleet()
+    fleet = Fleet(num = 7, cap = 30)
     output_dir = Path(__file__).resolve().parent / "rs"
     results_frame, optimals_frame, rs_path, optimals_path = main(config, output_dir)
     # results_frame = pd.read_json(output_dir / "demand_rs_260508_1147.json")

@@ -88,8 +88,9 @@ def _build_temporal_weights(config, heterogeneity: float) -> np.ndarray:
     clipped = float(np.clip(heterogeneity, 0.0, 1.0))
     minutes = np.arange(config.span, dtype=float)
     uniform = np.full(config.span, 1.0 / config.span, dtype=float)
+    peak_width = float(getattr(config, "peak_width_minutes", 30))
     peak_weights = [
-        np.exp(-0.5 * ((minutes - peak) / 10.0) ** 2)
+        np.exp(-0.5 * ((minutes - peak) / peak_width) ** 2)
         for peak in config.peaks
     ]
     peaked = _normalize_weights(np.sum(peak_weights, axis=0))
@@ -104,7 +105,9 @@ def generate_requests(
     network_context=None,
 ) -> list[TripRequest]:
     rng = np.random.default_rng(int(scenario["seed"]))
-    request_count = int(rng.poisson(lam=float(scenario["lambda"])))
+    lambda_per_hour = float(scenario["lambda"])
+    mean_count = lambda_per_hour * config.span / 60.0
+    request_count = int(rng.poisson(lam=mean_count))
     if request_count <= 0:
         return []
 
