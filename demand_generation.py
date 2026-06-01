@@ -2,37 +2,27 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any
-
 import networkx as nx
 import numpy as np
 from pathlib import Path
 import pandas as pd
 
+import netx as net
+import plt_draw as plt
+from config import TripRequest
 NetworkNode = Any # type alias: network node（网络节点）
 
 
-@dataclass(frozen=True, slots=True)
-class TripRequest:
-    request_id: int
-    origin: NetworkNode
-    destination: NetworkNode
-    departure_time: int
-    request_type: str = "real_time"
-
-
-def _build_grid_nodes(grid_size: int) -> list[NetworkNode]:
-    return [(x, y) for x in range(grid_size) for y in range(grid_size)]
-
-
-def _normalize_weights(weights: np.ndarray) -> np.ndarray: # 归一化权重
+def _weights_normalize(weights: np.ndarray) -> np.ndarray: # 归一化权重
     total = float(weights.sum())
     if total <= 0.0:
         return np.full(weights.shape, 1.0 / weights.size, dtype=float)
     return weights / total
 
 
-def _hotspot_weights(nodes: list[NetworkNode], hotspot: NetworkNode) -> np.ndarray: # 计算每个节点到热点的曼哈顿距离，并将距离转换为权重，距离越近权重越大
+def _weights_hotspot(nodes: list[NetworkNode], hotspot: NetworkNode) -> np.ndarray: # 计算每个节点到热点的曼哈顿距离，并将距离转换为权重，距离越近权重越大
     distances = np.array(
         [abs(node[0] - hotspot[0]) + abs(node[1] - hotspot[1]) for node in nodes],
         dtype=float,
@@ -40,7 +30,7 @@ def _hotspot_weights(nodes: list[NetworkNode], hotspot: NetworkNode) -> np.ndarr
     return np.exp(-0.3 * distances)
 
 
-def _network_hotspot_weights(
+def _weights_network_hotspot(
     graph: nx.Graph,
     nodes: list[NetworkNode],
     hotspot: NetworkNode,
@@ -52,7 +42,7 @@ def _network_hotspot_weights(
             weight="weight",
         )
         distances = np.array([float(lengths[node]) for node in nodes], dtype=float)
-        return np.exp(-0.3 * distances)
+        return np.exp(-0.3 * 0.1 * distances) # 将距离转换为权重，距离越近权重越大
 
     positions = nx.get_node_attributes(graph, "pos")
     if (
@@ -74,17 +64,17 @@ def _network_hotspot_weights(
     return np.full(len(nodes), 1.0 / len(nodes), dtype=float)
 
 
-def _mix_spatial_weights( # 混合空间权重
+def _weights_mix_spatial( # 混合空间权重
     uniform_weights: np.ndarray,
     hotspot_weights: np.ndarray,
     heterogeneity: float,
 ) -> np.ndarray:
-    clipped = float(np.clip(heterogeneity, 0.0, 1.0))
-    mixed = (1.0 - clipped) * uniform_weights + clipped * hotspot_weights
-    return _normalize_weights(mixed)
+
+    mixed = (1.0 - heterogeneity) * uniform_weights + heterogeneity * hotspot_weights
+    return _weights_normalize(mixed)
 
 
-def _build_temporal_weights(config, heterogeneity: float) -> np.ndarray:
+def _weights_build_temporal(config, heterogeneity: float) -> np.ndarray:
     clipped = float(np.clip(heterogeneity, 0.0, 1.0))
     minutes = np.arange(config.span, dtype=float)
     uniform = np.full(config.span, 1.0 / config.span, dtype=float)
@@ -93,56 +83,55 @@ def _build_temporal_weights(config, heterogeneity: float) -> np.ndarray:
         np.exp(-0.5 * ((minutes - peak) / peak_width) ** 2)
         for peak in config.peaks
     ]
-    peaked = _normalize_weights(np.sum(peak_weights, axis=0))
+    peaked = _weights_normalize(np.sum(peak_weights, axis=0))
     mixed = (1.0 - clipped) * uniform + clipped * peaked
-    return _normalize_weights(mixed)
+    return _weights_normalize(mixed)
 
 
-def generate_requests(
+def _requests_generate(
     config,
     nets,
     scenario: dict,
     network_context=None,
 ) -> list[TripRequest]:
     rng = np.random.default_rng(int(scenario["seed"]))
-    lambda_per_hour = float(scenario["lambda"])
-    mean_count = lambda_per_hour * config.span / 60.0
+    lambda_per_hour = float(scenario["lambda"]) # 每小时需求强度（demand intensity per hour）
+    mean_count = lambda_per_hour * config.span / 60.0       # 计算在给定时间范围内的平均请求数量（mean request count over the time horizon）
     request_count = int(rng.poisson(lam=mean_count))
     if request_count <= 0:
-        return []
+        raise ValueError("No request generated")
 
-    if network_context is None or network_context.network_type == "grid":
-        nodes = _build_grid_nodes(nets.grid)
-        origin_hotspot_weights = _hotspot_weights(nodes, config.o_hotspot)
-        destination_hotspot_weights = _hotspot_weights(nodes, config.d_hotspot)
-    else:
-        nodes = list(network_context.request_nodes)
-        origin_hotspot_weights = _network_hotspot_weights(
-            network_context.graph,
-            nodes,
-            config.o_hotspot,
-        )
-        destination_hotspot_weights = _network_hotspot_weights(
-            network_context.graph,
-            nodes,
-            config.d_hotspot,
-        )
+    nodes = list(network_context.request_nodes)
+    if len(nodes) < 2:
+        raise ValueError("request generation requires at least two request nodes")
+
+    #目前的空间衰减exp(-0.3 * 0.1 * distances)
+    origin_hotspot_weights = _weights_network_hotspot(
+        network_context.graph,
+        nodes,
+        config.o_hotspot,
+    )
+    destination_hotspot_weights = _weights_network_hotspot(
+        network_context.graph,
+        nodes,
+        config.d_hotspot,
+    )
 
     node_indices = np.arange(len(nodes))
     minute_indices = np.arange(config.span)
     uniform_node_weights = np.full(len(nodes), 1.0 / len(nodes), dtype=float)
 
-    origin_weights = _mix_spatial_weights(
+    origin_weights = _weights_mix_spatial(
         uniform_node_weights,
         origin_hotspot_weights,
         float(scenario["hs"]),
     )
-    destination_weights = _mix_spatial_weights(
+    destination_weights = _weights_mix_spatial(
         uniform_node_weights,
         destination_hotspot_weights,
         float(scenario["hs"]),
     )
-    temporal_weights = _build_temporal_weights(config, float(scenario["ht"]))
+    temporal_weights = _weights_build_temporal(config, float(scenario["ht"]))
 
     requests: list[TripRequest] = []
     for request_id in range(request_count):
@@ -160,11 +149,12 @@ def generate_requests(
                 departure_time=departure_time,
             )
         )
-
+    print(f"Generated {len(requests)} requests with lambda={lambda_per_hour}, hs={scenario['hs']}, ht={scenario['ht']}")
+    plt._draw_request(requests, nets, Path(__file__).resolve().parent / "rs"/"requests")
     return sorted(requests, key=lambda request: (request.departure_time, request.request_id))
 
 
-def assign_request_types(
+def _request_types_assign(
     requests: list[TripRequest],
     alpha: float,
     seed: int | None,
@@ -184,30 +174,27 @@ def assign_request_types(
         typed_requests.append(replace(request, request_type=request_type))
     return typed_requests
 
-def request_to_record(request: TripRequest) -> dict:
-    return {
-        "request_id": request.request_id,
-        "origin": _node_to_record(request.origin),
-        "destination": _node_to_record(request.destination),
-        "departure_time": request.departure_time,
-        "request_type": request.request_type,
-    }
 
 
-def _node_to_record(node: NetworkNode):
-    if isinstance(node, tuple):
-        return list(node)
-    return node
 
-
-def save_requests(
+def _requests_save(
     requests: list[TripRequest],
     output_dir: Path,
-    file_name: str = "requests.json",
+    date: str,
 ) -> Path:
+    file_name = f"requests_{date}.json"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / file_name
-    records = [request_to_record(request) for request in requests]
+    output_path = output_dir / "requests" / file_name
+    records = [
+        {
+            "request_id": request.request_id,
+            "origin": request.origin,
+            "destination": request.destination,
+            "departure_time": request.departure_time,
+            "request_type": request.request_type,
+        }
+        for request in requests
+    ]
 
     with output_path.open("w", encoding="utf-8") as handle:
         json.dump(records, handle, ensure_ascii=False, indent=2)
@@ -231,12 +218,13 @@ def load_requests(path: Path) -> list[TripRequest]:
     ]
 
 
-def _record_to_node(value):
+def _record_to_node(value): # 将记录中的节点表示转换回网络节点对象，如果是列表则转换为元组，否则保持原样
     if isinstance(value, list):
         return tuple(value)
     return value
 
 def avg_served(frame: pd.DataFrame, division: pd.DataFrame, ac_rate: str| None = None) -> pd.DataFrame:
+    # 计算平均服务指标：平均净支出、平均服务时间，以及如果指定了接受率计算，则计算接受率
     plot_frame = frame.copy()
     served_num = plot_frame["served_requests"]
     plot_frame["avg_net_expenditure"] = (division.iloc[:, 0] / served_num).fillna(0.0)

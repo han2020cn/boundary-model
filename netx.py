@@ -92,11 +92,13 @@ def build_radial_ring_graph(
 
 def build_network_context(nets) -> NetworkContext:
     """Build graph and route configuration from the user-editable Nets class."""
-    network_type = getattr(nets, "network_type", "grid")
+    network_type = getattr(nets, "_type")
     if network_type == "grid":
         graph = build_grid_graph(int(nets.grid))
         hub = getattr(nets, "grid_hub", getattr(nets, "hub", (4, 4)))
         route_specs = getattr(nets, "grid_routes", None)
+        if route_specs is None:
+            route_specs = getattr(nets, "routes", None)
         if route_specs is None:
             route_specs = (getattr(nets, "fixed_stops"),)
         request_nodes = tuple(graph.nodes)

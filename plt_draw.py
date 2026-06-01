@@ -6,17 +6,20 @@ from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from matplotlib.cm import ScalarMappable
-from matplotlib.colors import Normalize
 from matplotlib.lines import Line2D
-from matplotlib.ticker import PercentFormatter
+
 import numpy as np
 import pandas as pd
+
 import statsmodels.api as sm
 from statsmodels.nonparametric.smoothers_lowess import lowess
-# from mpl_toolkits.mplot3d import Axes3D
+import demand_generation as dg
+import netx as net
+import functions as fs
+
 
 # ===== 2. 为不同 mode_id 定义颜色 =====
+
 MODE_COLORS = {
     1: "tab:grey",
     2: "tab:blue",
@@ -24,12 +27,6 @@ MODE_COLORS = {
     4: "tab:red",
 }
 
-MODE_LABELS = {
-    1: "Mode 1",
-    2: "Mode 2",
-    3: "Mode 3",
-    4: "Mode 4",
-}
 
 COST_TRADEOFF_LINESTYLES = {
     1: "-",
@@ -40,35 +37,145 @@ COST_TRADEOFF_LINESTYLES = {
 
 COST_TRADEOFF_MARKERS = ("*", "X", "^", "D", "o", "s", "P")
 
-REGRESSION_REPORT_COLUMNS = [
-    "plot_name",
-    "panel",
-    "x_key",
-    "y_key",
-    "mode_id",
-    "mode_label",
-    "n",
-    "slope",
-    "intercept",
-    "r_squared",
-    "p_value",
-    "confidence_level",
-    "x_min",
-    "x_max",
-    "status",
-]
+
 
 _DEFAULT_REGRESSION_TIMESTAMP: str | None = None
 
+# Draw request origin/destination points（请求起终点） on the network
+def _draw_request(
+    input_file: str|list[TripRequest],
+    nets,
+    output_dir: Path | None = None,
+) -> Path:
+    png_name = f"distribution_{datetime.now().strftime('%m%d_%H%M%S')}.png" #png文件名
+    if isinstance(input_file, list):
+        requests = input_file
+    else:
+        requests = dg.load_requests(Path(output_dir/input_file))
+    context = net.build_network_context(nets)
+    graph = context.graph
+    network_type = context.network_type
+    _validate_nodes(requests, graph)
+
+    if network_type == "grid":
+        pos = _grid_node_positions(graph, nets)
+    elif network_type == "hub_spoke":
+        pos = _hub_spoke_node_positions(graph)
+    else:
+        raise ValueError("network_type must be 'grid' or 'hub_spoke'")
+
+    output_path = Path(output_dir) / png_name
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7), sharex=False, sharey=False)
+    # _draw_network_base(axes[0], graph, pos, context.hub, labels=None)
+    _draw_request_points(axes, requests, pos)
+    axes[0].set_title("origins")
+    axes[1].set_title("destinations")
+    for ax in axes:
+        ax.set_xlim(-10, nets.grid+10)
+        ax.set_ylim(-10, nets.grid+10)
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_title(f"Request Origins and Destinations ({network_type})")
+        ax.set_aspect("auto", adjustable="box")
+        ax.legend(loc="best", framealpha=0.88)
+
+    plt.tight_layout()
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    return output_path
+
+
+def _validate_nodes(requests, graph) -> None:
+    missing = []
+    for request in requests:
+        if request.origin not in graph:
+            missing.append((request.request_id, "origin", request.origin))
+        if request.destination not in graph:
+            missing.append((request.request_id, "destination", request.destination))
+
+    if missing:
+        details = ", ".join(
+            f"request {request_id} {field}={node!r}"
+            for request_id, field, node in missing[:10]
+        )
+        if len(missing) > 10:
+            details += f", ... {len(missing) - 10} more"
+        raise ValueError(f"requests contain nodes outside graph: {details}")
+
+
+def _grid_node_positions(graph, nets) -> dict: # 根据网格网络的节点坐标计算位置
+    grid_len = float(getattr(nets, "grid_len", 1.0))
+    positions = {}
+    for node in graph.nodes:
+        if (
+            not isinstance(node, tuple)
+            or len(node) != 2
+            or not all(isinstance(value, (int, float)) for value in node)
+        ):
+            raise ValueError(f"grid node must be a numeric (x, y) tuple: {node!r}")
+        positions[node] = (float(node[0]) * grid_len, float(node[1]) * grid_len)
+    return positions
+
+
+def _hub_spoke_node_positions(graph) -> dict:
+    positions = {}
+    missing_nodes = []
+    invalid_nodes = []
+
+    for node, data in graph.nodes(data=True):
+        if "pos" not in data:
+            missing_nodes.append(node)
+            continue
+        raw_pos = data["pos"]
+        if (
+            not isinstance(raw_pos, tuple)
+            or len(raw_pos) != 2
+            or not all(isinstance(value, (int, float)) for value in raw_pos)
+        ):
+            invalid_nodes.append(node)
+            continue
+        positions[node] = (float(raw_pos[0]), float(raw_pos[1]))
+
+    if missing_nodes:
+        raise ValueError(f"hub_spoke graph nodes missing 'pos': {missing_nodes[:10]}")
+    if invalid_nodes:
+        raise ValueError(f"hub_spoke graph nodes have invalid 'pos': {invalid_nodes[:10]}")
+    return positions
+
+
+def _draw_request_points(axes, requests, pos: dict) -> None:
+    #  2D histogram heatmap 也可以考虑用热力图
+    origin_x = np.asarray([pos[request.origin][0] for request in requests])
+    origin_y = np.asarray([pos[request.origin][1] for request in requests])
+    destination_x = np.asarray([pos[request.destination][0] for request in requests])
+    destination_y = np.asarray([pos[request.destination][1] for request in requests])
+    
+    add_scatter(axes[0], records = None,
+                x_key = origin_x,
+                y_key = origin_y,
+                )
+    
+    add_scatter(axes[1], records = None,
+                x_key = destination_x,
+                y_key = destination_y,
+                )
+    
+
+
+
 #3d scatter plot
-def plts_3d(path_file: Path,
-            x_key, y_key, z_key) -> Path:
-    records, json_path = load_records(Path(path_file))
-    outpng = json_path.with_name("3d_" + json_path.stem).with_suffix(".png")
+def plts_3d(frame: pd.DataFrame,
+            output_dir: Path,
+            date_stamp: str,
+            x_key: str, y_key: str, z_key: str,
+            offset: bool) -> Path:
+
+    outpng = Path(output_dir) / f"3d_{date_stamp}.png"
 
     fig = plt.figure(figsize=(11, 8))
     ax = fig.add_subplot(111, projection="3d")
-    model_3d(ax, records, x_key, y_key, z_key)
+    model_3d(ax, frame, x_key, y_key, z_key, offset)
     ax.legend(
         title="mode_id",
         loc="center left",
@@ -76,16 +183,17 @@ def plts_3d(path_file: Path,
         borderaxespad=0.0,
     )
 
-    plt.tight_layout(rect=(0.0, 0.0, 0.78, 1.0))
+    plt.tight_layout(rect=(0.0, 0.0, 0.72, 1.0))
     plt.savefig(outpng, dpi=600, bbox_inches="tight")
     plt.show()
-    #plt.close(fig)
+    plt.close(fig)
     return outpng
 
 # 2d scatter plot
 def plts_2d(
     frame: pd.DataFrame,
     output_path: Path,
+    date_stamp: str,
     x_key,
     y_key,
     types: list[str],
@@ -96,7 +204,7 @@ def plts_2d(
     confidence: float = 0.95,
     regression_timestamp: str | None = None,
 ) -> Path:
-    outpng = Path(output_path)/"2d_plots.png"
+    outpng = Path(output_path)/f"2d_plots_{date_stamp}.png"
     outpng.parent.mkdir(parents=True, exist_ok=True)
 
     fig = plt.figure(figsize=(11, 8))
@@ -114,24 +222,21 @@ def plts_2d(
     )
 
     if export_regression:
-        report_frame = build_regression_report(
+        report_frame = fs._regression_report(
             frame,
+            output_path,
             x_key,
             y_key,
             plot_name="2d",
             panel="main",
             confidence=confidence,
         )
-        export_regression_report(
-            [report_frame],
-            outpng.parent,
-            timestamp=regression_timestamp,
-        )
+
 
     plt.tight_layout(rect=(0.0, 0.0, 0.84, 1.0))
     plt.savefig(outpng, dpi=600, bbox_inches="tight")
-    plt.show()
-    #plt.close(fig)
+    # plt.show()
+    plt.close(fig)
     return outpng
 
 
@@ -139,6 +244,7 @@ def plts_2d_pair(
     left_frame: pd.DataFrame,
     right_frame: pd.DataFrame,
     output_dir: Path,
+    date_stamp,
     x_key,
     x1_key,
     y_key,
@@ -154,7 +260,7 @@ def plts_2d_pair(
     confidence: float = 0.95,
     regression_timestamp: str | None = None,
 ) -> Path:
-    outpng = Path(output_dir) / f"2d_pairs_{datetime.now().strftime('%m%d_%H%M%S')}.png"
+    outpng = Path(output_dir) / f"2d_pairs_{date_stamp}.png"
     outpng.parent.mkdir(parents=True, exist_ok=True)
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 7), sharex=False, sharey=False)
@@ -180,29 +286,25 @@ def plts_2d_pair(
         show_lowess=show_lowess,
         confidence=confidence,
     )
-    _draw_unserved_portion_lines(axes[1], right_frame, x1_key)
 
     if export_regression:
-        left_report = build_regression_report(
+        left_report = fs._regression_report(
             left_frame,
+            output_dir,
             x_key,
             y_key,
             plot_name="2d_pairs",
             panel="left",
             confidence=confidence,
         )
-        right_report = build_regression_report(
+        right_report = fs._regression_report(
             right_frame,
+            output_dir,
             x1_key,
             y1_key,
             plot_name="2d_pairs",
             panel="right",
             confidence=confidence,
-        )
-        export_regression_report(
-            [left_report, right_report],
-            outpng.parent,
-            timestamp=regression_timestamp,
         )
 
     handles, labels = axes[0].get_legend_handles_labels()
@@ -221,22 +323,19 @@ def plts_2d_pair(
 
     plt.tight_layout(rect=(0.0, 0.0, 0.88, 1.0))
     plt.savefig(outpng, dpi=600, bbox_inches="tight")
-    plt.show()
-    #plt.close(fig)
+    #   plt.show()
+    plt.close(fig)
     return outpng
 
 
 def plts_cost_tradeoff(
     frame: pd.DataFrame, 
     output_dir: Path,
+    date_stamp: str,
     fleet_sizes: Sequence[int] | None = None,
     config: Config | None = None,
     x_key: str = "avg_net_expenditure",
     y_key: str = "avg_service_time",
-    color_key: str = "acceptance_rate",
-    acceptance_vmin: float = 0.8,
-    acceptance_vmax: float = 1.0,
-    show: bool = True,
 ) -> Path:
     '''frame: pd.DataFrame
     "lambda",
@@ -244,33 +343,19 @@ def plts_cost_tradeoff(
     "fleet_size",
     "avg_net_expenditure",
     "avg_service_time",
-    "acceptance_rate",
     '''
-    outpng = Path(output_dir) / f"cost_tradeoff_{datetime.now().strftime('%m%d_%H%M')}.png"
+    outpng = Path(output_dir) / f"cost_tradeoff_{date_stamp}.png"
     outpng.parent.mkdir(parents=True, exist_ok=True)
 
-    plot_frame = _valid_cost_tradeoff_frame(frame, x_key, y_key, color_key)
-    if fleet_sizes is not None:
-        plot_frame = plot_frame[plot_frame["fleet_size"].isin([int(value) for value in fleet_sizes])]
-    if config.lambdas is not None:
-        plot_frame = plot_frame[plot_frame["lambda"].isin([float(value) for value in config.lambdas])]
-    if config.modes is not None:
-        plot_frame = plot_frame[plot_frame["mode_id"].isin([int(value) for value in config.modes])]
-
-    if plot_frame.empty:
-        raise ValueError("No cost tradeoff rows available after filtering.")
-
-    lambda_values = _ordered_values(plot_frame, "lambda", config.lambdas)
-    fleet_values = _ordered_values(plot_frame, "fleet_size", fleet_sizes)
-    mode_values = _ordered_values(plot_frame, "mode_id", config.modes)
+    lambda_values = _ordered_values(frame, "lambda", config.lambdas)
+    fleet_values = _ordered_values(frame, "fleet_size", fleet_sizes)
+    mode_values = _ordered_values(frame, "mode_id", config.modes)
     lambda_colors = _value_color_map(lambda_values)
     fleet_markers = _fleet_marker_map(fleet_values)
 
     fig, ax = plt.subplots(figsize=(12, 7))
-    acceptance_cmap = plt.get_cmap("RdYlGn")
-    norm = Normalize(vmin=acceptance_vmin, vmax=acceptance_vmax)
-    #折线
-    # for mode_id, group in plot_frame.groupby("mode_id"):
+    # #折线
+    # for mode_id, group in frame.groupby("mode_id"):
     #     sorted_group = group.sort_values(by="lambda")
     #     ax.plot(
     #         sorted_group[x_key],
@@ -282,15 +367,13 @@ def plts_cost_tradeoff(
     #         label="_nolegend_",
     #         zorder=2,
     #     )
-
-    for fleet_size, group in plot_frame.groupby("fleet_size"):
+    #散点
+    for fleet_size, group in frame.groupby("fleet_size"):
         point_colors = group["lambda"].map(lambda value: lambda_colors[float(value)]).tolist() #根据 lambda 值映射颜色
         ax.scatter(
             group[x_key],
             group[y_key],
             c=point_colors,
-            # cmap=acceptance_cmap,
-            norm=norm,
             marker=fleet_markers[int(fleet_size)],
             s=72,
             edgecolors="black",
@@ -300,57 +383,24 @@ def plts_cost_tradeoff(
             zorder=3,
         )
 
-    colorbar = fig.colorbar(
-        ScalarMappable(norm=norm, cmap=acceptance_cmap),
-        ax=ax,
-        pad=0.02,
-    )
-    colorbar.set_label("Acceptance Rate (%)")
-    colorbar.ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
-
     _add_cost_tradeoff_legends(
         ax,
-        colorbar.ax,
-        lambda_values,
-        lambda_colors,
-        mode_values,
-        fleet_values,
-        fleet_markers,
+        lambda_values = lambda_values,
+        lambda_colors = lambda_colors,
+        # mode_values = mode_values,
+        # fleet_values = fleet_values,
+        fleet_markers = fleet_markers,
     )
 
     ax.set_xlabel("Operator Unit Cost (£/pax)")
-    ax.set_ylabel("Passenger Unit Cost (£/pax)")
+    ax.set_ylabel("Passenger Unit Cost (minutes/pax)")
+    ax.set_title("Cost Tradeoff")
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout(rect=(0.0, 0.0, 0.78, 1.0))
     plt.savefig(outpng, dpi=600, bbox_inches="tight")
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
+    plt.close(fig)
     return outpng
-
-
-def _valid_cost_tradeoff_frame(
-    frame: pd.DataFrame,
-    x_key: str,
-    y_key: str,
-    color_key: str,
-) -> pd.DataFrame:
-    required_columns = ["lambda", "mode_id", "fleet_size", x_key, y_key, color_key]
-    missing_columns = set(required_columns) - set(frame.columns)
-    if missing_columns:
-        raise KeyError(f"Missing cost tradeoff columns: {sorted(missing_columns)}")
-
-    valid_frame = frame.loc[:, required_columns].copy()
-    for column in required_columns:
-        valid_frame[column] = pd.to_numeric(valid_frame[column], errors="coerce")
-
-    valid_frame = valid_frame.dropna(subset=required_columns)
-    valid_frame["mode_id"] = valid_frame["mode_id"].astype(int)
-    valid_frame["fleet_size"] = valid_frame["fleet_size"].astype(int)
-    valid_frame["lambda"] = valid_frame["lambda"].astype(float)
-    return valid_frame
 
 
 def _ordered_values(
@@ -389,41 +439,65 @@ def _fleet_marker_map(fleet_values: Sequence[int]) -> dict[int, str]:
 
 def _add_cost_tradeoff_legends(
     ax,
-    colorbar_ax,
-    lambda_values: Sequence,
-    lambda_colors: dict,
-    mode_values: Sequence[int],
-    fleet_values: Sequence[int],
-    fleet_markers: dict[int, str],
+    lambda_values: Sequence | None = None,
+    lambda_colors: dict | None = None,
+    mode_values: Sequence[int] | None = None,
+    fleet_values: Sequence[int] | None = None,
+    fleet_markers: dict[int, str] | None = None,
 ) -> None:
-    lambda_handles = [
-        Line2D(
-            [],
-            [],
-            color=lambda_colors[lambda_value],
-            linestyle="-",
-            linewidth=2.0,
-            label=f"λ = {_format_number(lambda_value)} requests/h",
+    fig = ax.figure
+    legend_x = 0.90
+    if lambda_values is not None:
+        lambda_handles = [
+            Line2D(
+                [],
+                [],
+                color=lambda_colors[lambda_value],
+                linestyle="-",
+                linewidth=2.0,
+                label=f"λ = {_format_number(lambda_value)} requests/h",
+            )
+            for lambda_value in lambda_values
+        ]
+        fig.legend(
+            handles=lambda_handles,
+            title="lambda",
+            loc="upper left",
+            bbox_to_anchor=(legend_x, 0.48),
+            bbox_transform=fig.transFigure,
+            borderaxespad=0.0,
+            framealpha=0.88,
+            fontsize=8,
         )
-        for lambda_value in lambda_values
-    ]
-    mode_handles = [
-        Line2D(
-            [],
-            [],
-            color="black",
-            linestyle=COST_TRADEOFF_LINESTYLES.get(int(mode_id), "-"),
-            linewidth=2.0,
-            label=MODE_LABELS.get(int(mode_id), f"Mode {int(mode_id)}"),
+    if mode_values is not None:
+        mode_handles = [
+            Line2D(
+                [],
+                [],
+                color="black",
+                linestyle=COST_TRADEOFF_LINESTYLES.get(int(mode_id), "-"),
+                linewidth=2.0,
+                label=MODE_LABELS.get(int(mode_id), f"Mode {int(mode_id)}"),
+            )
+            for mode_id in mode_values
+        ]
+        fig.legend(
+            handles=mode_handles,
+            title="mode_id",
+            loc="upper left",
+            bbox_to_anchor=(legend_x, 0.72),
+            bbox_transform=fig.transFigure,
+            borderaxespad=0.0,
+            framealpha=0.88,
+            fontsize=8,
         )
-        for mode_id in mode_values
-    ]
-    fleet_handles = [
-        Line2D(
-            [],
-            [],
-            color="black",
-            marker=fleet_markers[int(fleet_size)],
+    if fleet_values is not None:
+        fleet_handles = [
+            Line2D(
+                [],
+                [],
+                color="black",
+                marker=fleet_markers[int(fleet_size)],
             linestyle="none",
             markerfacecolor="white",
             markeredgecolor="black",
@@ -432,35 +506,16 @@ def _add_cost_tradeoff_legends(
         )
         for fleet_size in fleet_values
     ]
-
-    colorbar_box = colorbar_ax.get_position()
-    lambda_legend = ax.figure.legend(
-        handles=lambda_handles,
-        title="lambda",
-        loc="upper left",
-        bbox_to_anchor=(colorbar_box.x1 + 0.02, colorbar_box.y1),
-        bbox_transform=ax.figure.transFigure,
-        borderaxespad=0.0,
-        framealpha=0.88,
-        fontsize=8,
-    )
-
-    mode_legend = ax.legend(
-        handles=mode_handles,
-        title="mode_id",
-        loc="lower left",
-        framealpha=0.88,
-        fontsize=8,
-    )
-    ax.add_artist(mode_legend)
-
-    ax.legend(
-        handles=fleet_handles,
-        title="fleet_size",
-        loc="upper right",
-        framealpha=0.88,
-        fontsize=8,
-    )
+        fig.legend(
+            handles=fleet_handles,
+            title="fleet_size",
+            loc="upper left",
+            bbox_to_anchor=(legend_x, 0.92),
+            bbox_transform=fig.transFigure,
+            borderaxespad=0.0,
+            framealpha=0.88,
+            fontsize=8,
+        )
 
 
 def _format_number(value) -> str:
@@ -469,8 +524,8 @@ def _format_number(value) -> str:
         return str(int(numeric_value))
     return f"{numeric_value:g}"
 
-
-def _draw_unserved_portion_lines(ax, frame: pd.DataFrame, x_key) -> None:
+# 画出未服务请求占比的线条
+def _draw_unserved_portion_lines(ax, frame: pd.DataFrame, x_key) -> None: 
     if "acceptance_rate" not in frame.columns:
         raise KeyError("Missing required column for unserved portion lines: acceptance_rate")
 
@@ -561,52 +616,58 @@ def _draw_regression_overlays(
     confidence: float,
 ) -> None:
     if show_ci:
-        draw_confidence_bands(ax, frame, x_key, y_key, confidence=confidence)
+        _draw_confidence_bands(ax, frame, x_key, y_key, confidence=confidence)
     if show_ols:
         draw_ols_lines(ax, frame, x_key, y_key, confidence=confidence)
     if show_lowess:
         draw_lowess_lines(ax, frame, x_key, y_key)
 
+MODE_LABELS = {
+    1: "Mode 1",
+    2: "Mode 2",
+    3: "Mode 3",
+    4: "Mode 4",
+}
 
-def fit_ols_by_mode(
+
+def fit_ols_by_mode(    #根据 mode_id 分组进行 OLS 回归拟合
     frame: pd.DataFrame,
     x_key,
     y_key,
     confidence: float = 0.95,
 ) -> dict[int, dict]:
-    valid_frame = _valid_regression_frame(frame, x_key, y_key)
-    mode_ids = sorted(set(MODE_LABELS) | set(valid_frame["mode_id"].astype(int)))
-    results: dict[int, dict] = {}
+    required_columns = {"mode_id", x_key, y_key}
+    missing_columns = required_columns - set(frame.columns)
+    if missing_columns:
+        raise KeyError(f"Missing regression columns: {sorted(missing_columns)}")
 
-    for mode_id in mode_ids:
-        mode_frame = valid_frame[valid_frame["mode_id"].astype(int) == mode_id].copy()
+    valid_frame = frame.loc[:, ["mode_id", x_key, y_key]].copy()
+    valid_frame[x_key] = pd.to_numeric(valid_frame[x_key], errors="coerce")
+    valid_frame[y_key] = pd.to_numeric(valid_frame[y_key], errors="coerce")
+    valid_frame["mode_id"] = pd.to_numeric(valid_frame["mode_id"], errors="coerce")
+    valid_frame = valid_frame.dropna(subset=["mode_id", x_key, y_key])
+    valid_frame["mode_id"] = valid_frame["mode_id"].astype(int)
+
+    results: dict[int, dict] = {}
+    for mode_id, mode_frame in valid_frame.groupby("mode_id"):
         x_values = mode_frame[x_key].astype(float)
         y_values = mode_frame[y_key].astype(float)
         n = int(len(mode_frame))
         x_min = float(x_values.min()) if n else None
         x_max = float(x_values.max()) if n else None
 
-        base_result = {
-            "mode_id": mode_id,
-            "mode_label": MODE_LABELS.get(mode_id, f"Mode {mode_id}"),
+        result = {
+            "status": "insufficient_data",
+            "x_grid": np.array([], dtype=float),
+            "prediction": pd.DataFrame(),
+            "model": None,
             "n": n,
             "x_min": x_min,
             "x_max": x_max,
-            "confidence_level": confidence,
         }
 
         if n < 2 or x_values.nunique() < 2:
-            results[mode_id] = {
-                **base_result,
-                "status": "insufficient_data",
-                "model": None,
-                "x_grid": np.array([], dtype=float),
-                "prediction": pd.DataFrame(),
-                "slope": None,
-                "intercept": None,
-                "r_squared": None,
-                "p_value": None,
-            }
+            results[int(mode_id)] = result
             continue
 
         x_series = pd.Series(x_values.to_numpy(dtype=float), name=str(x_key))
@@ -614,7 +675,7 @@ def fit_ols_by_mode(
         design = sm.add_constant(x_series, has_constant="add")
         model = sm.OLS(y_series, design).fit()
 
-        x_grid = np.linspace(float(x_values.min()), float(x_values.max()), 100)
+        x_grid = np.linspace(x_min, x_max, 100)
         prediction_design = sm.add_constant(
             pd.Series(x_grid, name=str(x_key)),
             has_constant="add",
@@ -623,19 +684,18 @@ def fit_ols_by_mode(
             alpha=1.0 - confidence,
         )
 
-        results[mode_id] = {
-            **base_result,
-            "status": "ok",
-            "model": model,
-            "x_grid": x_grid,
-            "prediction": prediction,
-            "slope": float(model.params[str(x_key)]),
-            "intercept": float(model.params["const"]),
-            "r_squared": float(model.rsquared),
-            "p_value": float(model.pvalues[str(x_key)]),
-        }
+        result.update(
+            {
+                "status": "ok",
+                "x_grid": x_grid,
+                "prediction": prediction,
+                "model": model,
+            }
+        )
+        results[int(mode_id)] = result
 
     return results
+
 
 
 def draw_ols_lines(
@@ -660,7 +720,7 @@ def draw_ols_lines(
         )
 
 
-def draw_confidence_bands(
+def _draw_confidence_bands(
     ax,
     frame: pd.DataFrame,
     x_key,
@@ -690,8 +750,9 @@ def draw_lowess_lines(
     y_key,
     frac: float = 0.6,
 ) -> None:
-    valid_frame = _valid_regression_frame(frame, x_key, y_key)
-    for mode_id, mode_frame in valid_frame.groupby("mode_id"):
+    frame[x_key] = pd.to_numeric(frame[x_key], errors="coerce") # 将 x_key 列转换为数值，无法转换的值会变成 NaN
+    frame[y_key] = pd.to_numeric(frame[y_key], errors="coerce")
+    for mode_id, mode_frame in frame.groupby("mode_id"):
         mode_frame = mode_frame.sort_values(by=x_key)
         if len(mode_frame) < 2 or mode_frame[x_key].nunique() < 2:
             continue
@@ -713,82 +774,6 @@ def draw_lowess_lines(
             zorder=2.25,
         )
 
-
-def build_regression_report(
-    frame: pd.DataFrame,
-    x_key,
-    y_key,
-    plot_name: str,
-    panel: str,
-    confidence: float = 0.95,
-) -> pd.DataFrame:
-    rows = []
-    for result in fit_ols_by_mode(frame, x_key, y_key, confidence).values():
-        rows.append(
-            {
-                "plot_name": plot_name,
-                "panel": panel,
-                "x_key": x_key,
-                "y_key": y_key,
-                "mode_id": result["mode_id"],
-                "mode_label": result["mode_label"],
-                "n": result["n"],
-                "slope": result["slope"],
-                "intercept": result["intercept"],
-                "r_squared": result["r_squared"],
-                "p_value": result["p_value"],
-                "confidence_level": result["confidence_level"],
-                "x_min": result["x_min"],
-                "x_max": result["x_max"],
-                "status": result["status"],
-            }
-        )
-
-    return pd.DataFrame(rows, columns=REGRESSION_REPORT_COLUMNS)
-
-
-def export_regression_report(
-    report_frames,
-    output_dir: Path,
-    timestamp: str | None = None,
-) -> Path:
-    if isinstance(report_frames, pd.DataFrame):
-        frames = [report_frames]
-    else:
-        frames = list(report_frames)
-
-    if frames:
-        report_frame = pd.concat(frames, ignore_index=True)
-    else:
-        report_frame = pd.DataFrame(columns=REGRESSION_REPORT_COLUMNS)
-
-    output_path = Path(output_dir) / f"regression_{_regression_timestamp(timestamp)}.csv"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if output_path.exists():
-        existing_frame = pd.read_csv(output_path)
-        report_frame = pd.concat([existing_frame, report_frame], ignore_index=True)
-
-    report_frame = report_frame.reindex(columns=REGRESSION_REPORT_COLUMNS)
-    report_frame.to_csv(output_path, index=False)
-    return output_path
-
-
-def _valid_regression_frame(frame: pd.DataFrame, x_key, y_key) -> pd.DataFrame:
-    required_columns = {"mode_id", x_key, y_key}
-    missing_columns = required_columns - set(frame.columns)
-    if missing_columns:
-        raise KeyError(f"Missing regression columns: {sorted(missing_columns)}")
-
-    valid_frame = frame.loc[:, ["mode_id", x_key, y_key]].copy()
-    valid_frame[x_key] = pd.to_numeric(valid_frame[x_key], errors="coerce")
-    valid_frame[y_key] = pd.to_numeric(valid_frame[y_key], errors="coerce")
-    valid_frame["mode_id"] = pd.to_numeric(valid_frame["mode_id"], errors="coerce")
-    valid_frame = valid_frame.dropna(subset=["mode_id", x_key, y_key])
-    valid_frame["mode_id"] = valid_frame["mode_id"].astype(int)
-    return valid_frame
-
-
 def _regression_timestamp(timestamp: str | None) -> str:
     global _DEFAULT_REGRESSION_TIMESTAMP
     if timestamp is not None:
@@ -800,7 +785,8 @@ def _regression_timestamp(timestamp: str | None) -> str:
 
 # 2x2 subplots
 def plts_4s(path_file: Path,
-            x_key, y_key, z_key) -> Path:
+            x_key, y_key, z_key,
+            offset: bool) -> Path:
     # ===== 1. 读取 JSON 文件 =====
     records, json_path = load_records(Path(path_file))
     outpng = Path(json_path).with_name("4s_" + json_path.stem).with_suffix(".png")
@@ -814,7 +800,7 @@ def plts_4s(path_file: Path,
     ax_xz = fig.add_subplot(223)
     ax_yz = fig.add_subplot(224)
 
-    ax_3d = model_3d(ax_3d, records, x_key, y_key, z_key)
+    ax_3d = model_3d(ax_3d, records, x_key, y_key, z_key, offset)
     ax_xy = add_projections(ax_xy, records, 
                  x_key, y_key, z_key,
                  'xy',
@@ -881,20 +867,24 @@ def plts_4s(path_file: Path,
     plt.tight_layout(rect=(0.0, 0.0, 0.82, 1.0))
 
     plt.savefig(outpng, dpi=600, bbox_inches="tight")
-    plt.show()
+    # plt.show()
     # plt.pause(0.1)  # 确保图像显示出来
     #plt.close(fig)
     return outpng
 
 # 3d scatter plot
-def model_3d(ax, records, x_key, y_key, z_key):
+def model_3d(ax, records, x_key, y_key, z_key,
+             offset_):
     # 为避免同一场景的点完全重叠，给不同 mode 一个很小的偏移
-    offsets = {
-        1: (-0.03, -0.03, -0.8),
-        2: (-0.03,  0.03, -0.3),
-        3: ( 0.03, -0.03,  0.3),
-        4: ( 0.03,  0.03,  0.8),
-    }
+    if offset_:
+        offsets = {
+            1: (-0.03, -0.03, -0.8),
+            2: (-0.03,  0.03, -0.3),
+            3: ( 0.03, -0.03,  0.3),
+            4: ( 0.03,  0.03,  0.8),
+        }
+    else:
+        offsets = {}
     add_scatter(ax, records, 
                 x_key, y_key, z_key,
                 offsets,
@@ -903,7 +893,7 @@ def model_3d(ax, records, x_key, y_key, z_key):
     ax.set_xlabel(x_key)
     ax.set_ylabel(y_key)
     ax.set_zlabel(z_key)
-    ax.set_title("Optimal Modes Across Selected Scenarios")
+    # ax.set_title("Optimal Modes Across Selected Scenarios")
     return ax
 
 def add_surface(ax, x_values: list[float], y_values: list[float], z_values: list[float]) -> bool:
@@ -930,45 +920,70 @@ def add_surface(ax, x_values: list[float], y_values: list[float], z_values: list
     return True
 
 
-def add_scatter(ax, records: list[dict],
-                x_key, y_key, z_key,
-                offsets: dict[int, tuple[float, float, float]] | None = None,                                   
+def add_scatter(ax, records: pd.DataFrame,
+                x_key, y_key, z_key = None,
+                offsets: dict[int, tuple[float, float, float]] | None = None,
                 ) -> None:
     if offsets is None:
         offsets = {}
     added_labels: set[int] = set()
 
-    for row in records:
-        mode_id = int(row["mode_id"])
-        x = float(row[x_key])
-        y = float(row[y_key])
-        z = float(row[z_key])
-        dx, dy, dz = offsets.get(mode_id, (0.0, 0.0, 0.0))
-        label = MODE_LABELS[mode_id] if mode_id not in added_labels else None
-        if label is not None:
-            added_labels.add(mode_id)
-
+    if z_key is None: # 2D散点图
+        x = x_key
+        y = y_key
+        rng = np.random.default_rng(0)
+        dx = np.round(
+            rng.uniform(-0.05, 0.05, size=x.shape),
+            3,
+        )
+        dy = np.round(
+            rng.uniform(-0.05, 0.05, size=y.shape),
+            3,
+        )
         ax.scatter(
             x + dx,
             y + dy,
-            z + dz,
-            color=MODE_COLORS.get(mode_id, "black"),
+            s=22,
+            marker="o",
+            color="tab:blue",
+            label="requests",
             edgecolors="black",
             linewidths=0.4,
-            s=60,
-            depthshade=False,
-            label=label,
+            alpha=0.5,
+            zorder=5,
         )
+    else:# 3D散点图
+        for _, row in records.iterrows():
+            mode_id = int(row["mode_id"])
+            x = float(row[x_key])
+            y = float(row[y_key])
+            z = float(row[z_key])
+            dx, dy, dz = offsets.get(mode_id, (0.0, 0.0, 0.0))
+            label = MODE_LABELS[mode_id] if mode_id not in added_labels else None
+            if label is not None:
+                    added_labels.add(mode_id)
+
+            ax.scatter(
+                x + dx,
+                y + dy,
+                z + dz,
+                color=MODE_COLORS.get(mode_id, "black"),
+                edgecolors="black",
+                linewidths=0.4,
+                s=60,
+                depthshade=False,
+                label=label,
+                )
     return ax
 
-def add_projections(ax, records: list[dict], 
+def add_projections(ax, records: pd.DataFrame, 
                     x_key = None, y_key = None, z_key = None, 
                     plane = None,
                     offsets: dict[int, tuple[float, float, float]] | None = None,
                     ) -> None:
     if offsets is None:
         offsets = {}
-    for row in records:
+    for _, row in records.iterrows():
         mode_id = row["mode_id"]
         x = row[x_key]
         y = row[y_key]
@@ -1020,3 +1035,288 @@ def load_records(path_file: Path) -> tuple[list[dict], Path]:
         raise ValueError("optimal_modes() returned an empty result set.")
 
     return records, results_path
+
+def demand_3d(frame: pd.DataFrame,  #x_key, y_key, z_key 分别是 config.ht, config.hs, config.lambdas,但是legend按照 mode_id 来显示颜色。
+            output_dir: Path,
+            date_stamp: str,
+            x_key: str, y_key: str, z_key: str,
+            offset: bool) -> Path:
+    outpng = Path(output_dir) / f"demand_3d_{date_stamp}.png"
+
+    fig = plt.figure(figsize=(11, 8))
+    ax = fig.add_subplot(111, projection="3d")
+    model_3d(ax, frame, x_key, y_key, z_key, offset)
+    ax.legend(
+        title="mode_id",
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        borderaxespad=0.0,
+    )
+
+    plt.tight_layout(rect=(0.0, 0.0, 0.72, 1.0))
+    plt.savefig(outpng, dpi=600, bbox_inches="tight")
+    plt.show()
+    #plt.close(fig)
+    return outpng
+
+
+def draw_section(
+    frame: pd.DataFrame,
+    x_key: str,
+    y_key: str,
+    z_key: str,
+    offset: bool = False,
+    *,
+    section_axes: Sequence[str] | None = None,
+    section_values: dict[str, Sequence[float]] | None = None,
+    max_sections: int = 9,
+    max_cols: int = 3,
+    section_strategy: str = "quantile",
+    tolerance: float = 1e-9,
+) -> list[Path]:
+    required_columns = {x_key, y_key, z_key, "mode_id"}
+    missing_columns = required_columns - set(frame.columns)
+    if isinstance(offset, (tuple, list)):
+        offset = bool(offset[0]) if len(offset) == 1 else bool(offset)
+
+    axis_keys = [x_key, y_key, z_key]
+    axis_lookup = {
+        "x": x_key,
+        "y": y_key,
+        "z": z_key,
+        x_key: x_key,
+        y_key: y_key,
+        z_key: z_key,
+    }
+
+    if section_axes is None:
+        selected_axes = axis_keys
+    else:
+        selected_axes = []
+        for axis in section_axes:
+            if axis not in axis_lookup:
+                raise ValueError(
+                    f"Unknown section axis '{axis}'. Use one of {sorted(axis_lookup)}."
+                )
+            selected_axes.append(axis_lookup[axis])
+
+    offsets = {
+        1: (-0.03, -0.03, -0.8),
+        2: (-0.03, 0.03, -0.3),
+        3: (0.03, -0.03, 0.3),
+        4: (0.03, 0.03, 0.8),
+    } if offset else {}
+
+    offset_by_axis = {
+        x_key: {mode_id: values[0] for mode_id, values in offsets.items()},
+        y_key: {mode_id: values[1] for mode_id, values in offsets.items()},
+        z_key: {mode_id: values[2] for mode_id, values in offsets.items()},
+    }
+
+    def _select_section_values(section_key: str) -> list[float]:
+        if section_values is not None and section_key in section_values:
+            return [float(value) for value in section_values[section_key]]
+
+        numeric_values = pd.to_numeric(frame[section_key], errors="coerce").dropna()
+        unique_values = np.asarray(sorted(numeric_values.unique()), dtype=float)
+        if unique_values.size == 0:
+            return []
+        if unique_values.size <= max_sections:
+            return unique_values.tolist()
+
+        if section_strategy == "quantile":
+            targets = np.quantile(unique_values, np.linspace(0.0, 1.0, max_sections))
+            indices = [
+                int(np.abs(unique_values - target).argmin())
+                for target in targets
+            ]
+        elif section_strategy == "even":
+            indices = np.rint(
+                np.linspace(0, unique_values.size - 1, max_sections)
+            ).astype(int).tolist()
+        else:
+            raise ValueError(
+                "section_strategy must be 'quantile' or 'even'. "
+                "Use section_values for manual selection."
+            )
+
+        return unique_values[sorted(set(indices))].tolist()
+
+    def _slice_frame(section_key: str, section_value: float) -> pd.DataFrame:
+        numeric_values = pd.to_numeric(frame[section_key], errors="coerce")
+        mask = np.isclose(
+            numeric_values.to_numpy(dtype=float),
+            float(section_value),
+            atol=tolerance,
+            rtol=0.0,
+            equal_nan=False,
+        )
+        return frame.loc[mask].copy()
+
+    def _format_section_value(value: float) -> str:
+        if float(value).is_integer():
+            return str(int(value))
+        return f"{value:g}"
+
+    def _draw_section_scatter(
+        ax,
+        section_frame: pd.DataFrame,
+        plot_x: str,
+        plot_y: str,
+    ) -> None:
+        if section_frame.empty:
+            ax.text(
+                0.5,
+                0.5,
+                "no data",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+            return
+
+        for mode_id, mode_frame in section_frame.groupby("mode_id"):
+            mode_id = int(mode_id)
+            x_values = pd.to_numeric(mode_frame[plot_x], errors="coerce").astype(float)
+            y_values = pd.to_numeric(mode_frame[plot_y], errors="coerce").astype(float)
+            if offset:
+                x_values = x_values + offset_by_axis[plot_x].get(mode_id, 0.0)
+                y_values = y_values + offset_by_axis[plot_y].get(mode_id, 0.0)
+            ax.scatter(
+                x_values,
+                y_values,
+                color=MODE_COLORS.get(mode_id, "black"),
+                edgecolors="black",
+                linewidths=0.4,
+                s=50,
+                alpha=0.85,
+            )
+
+    outpngs: list[Path] = []
+    for section_key in selected_axes:
+        plot_x, plot_y = [key for key in axis_keys if key != section_key]
+        values = _select_section_values(section_key)
+        if not values:
+            continue
+
+        n_sections = len(values)
+        n_cols = min(max_cols, n_sections)
+        n_rows = int(np.ceil(n_sections / n_cols))
+        fig, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            figsize=(5.0 * n_cols, 4.0 * n_rows),
+            squeeze=False,
+        )
+        flat_axes = axes.ravel()
+
+        for ax, section_value in zip(flat_axes, values):
+            section_frame = _slice_frame(section_key, section_value)
+            _draw_section_scatter(ax, section_frame, plot_x, plot_y)
+            ax.set_xlabel(plot_x)
+            ax.set_ylabel(plot_y)
+            ax.set_title(f"{section_key} = {_format_section_value(section_value)}")
+            ax.grid(True, alpha=0.3)
+
+        for ax in flat_axes[n_sections:]:
+            ax.set_visible(False)
+
+        modes = sorted(
+            pd.to_numeric(frame["mode_id"], errors="coerce")
+            .dropna()
+            .astype(int)
+            .unique()
+        )
+        handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="white",
+                markerfacecolor=MODE_COLORS.get(mode_id, "black"),
+                markeredgecolor="black",
+                markersize=8,
+                linestyle="",
+                label=MODE_LABELS.get(mode_id, f"Mode {mode_id}"),
+            )
+            for mode_id in modes
+        ]
+        fig.legend(
+            handles=handles,
+            title="mode_id",
+            loc="center left",
+            bbox_to_anchor=(0.90, 0.5),
+            borderaxespad=0.0,
+        )
+        fig.suptitle(f"Section by {section_key}: {plot_x}-{plot_y}", y=0.995)
+        plt.tight_layout(rect=(0.0, 0.0, 0.86, 0.96))
+
+        plt.show()
+
+    return 
+
+#导入class
+from config import config
+
+if __name__ == "__main__":    
+    results_dir = Path(__file__).resolve().parent /"rs" 
+    result_file = results_dir / "de_optimal_260601_1545.json" # 路径
+    date_stamp = result_file.stem.removeprefix("de_optimal_")
+    results_frame = pd.read_json(result_file) 
+    
+    x = "served_requests"
+    x1 = "served_requests"
+    y = "avg_net_expenditure"
+    y1 = "avg_service_time"
+    z = "lambda"
+    types = ["mode_id"] 
+    # plot_columns = [
+    #     "mode_id",
+    #     "served_requests",
+    #     "net_expenditure",
+    #     "total_service_time",
+    # ]
+    
+    a = results_frame[["net_expenditure", "total_service_time"]].copy() # dividend
+
+    fr_plot1 = dg.avg_served(results_frame, a, "acceptance") #计算请求的平均值
+    
+    # fs.json_to_excel(output_dir/ "1_rs_260519_2037.json")
+    output_dir = Path(__file__).resolve().parent / "rs"/"rs_new" #路径
+    plts_2d(fr_plot1,output_dir,date_stamp,y,y1,types)
+    plts_2d_pair(   #画图 #plts_3d xyz图, plts_2d xy图, plts_4s 2x2图
+        fr_plot1,
+        fr_plot1,
+        output_dir,
+        date_stamp,
+        x,
+        x1,
+        y,
+        y1,
+        types,
+        left_title=y,
+        right_title=y1,
+        prebooking_alpha=config.pre_alpha,
+    ) 
+    
+
+    fr_plot2 = dg.avg_served(results_frame, a, "acceptance") #计算请求的平均值
+    plts_cost_tradeoff(fr_plot2, output_dir, date_stamp, config = config )
+    if "optimal" in str(result_file): # 如果是最优解的结果文件，则画 3D 图和需求图
+        offset = False,
+    else:
+        offset = True
+    
+    plts_3d(fr_plot2, output_dir, date_stamp, "avg_net_expenditure", "avg_service_time", "lambda", offset)
+    demand_3d(fr_plot2, output_dir, date_stamp, "ht", "hs", "lambda", offset)
+    draw_section(
+    fr_plot2,
+    "ht",
+    "hs",
+    "lambda",
+    offset,
+    )
+
+    print("Processing complete.")
+    input("Press Enter to continue...")
+    print("Continuing program...")

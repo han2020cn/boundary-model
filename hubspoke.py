@@ -49,11 +49,12 @@ def _select_inbound_leg(
                 "onboard_time": float(distance_to_hub),
                 "cycle_finish": float(arrival_time),
                 "departure_key": (dispatch.vehicle_id, cycle_start_time),
+                "objective": float((boarding_time - earliest_time) + distance_to_hub),
                 "ranking": ranking,
             }
         )
 
-    best_leg, _ = _minimize_candidate(
+    best_leg, _ = _minimize_objective(
         candidates,
         (_build_path_capacity_constraint(loads),),
     )
@@ -106,13 +107,15 @@ def _select_outbound_leg(
                 "onboard_time": float(distance_from_hub),
                 "cycle_finish": float(cycle_finish),
                 "departure_key": (dispatch.vehicle_id, departure_time),
+                "objective": float(
+                    (departure_time - earliest_hub_departure) + distance_from_hub
+                ),
                 "ranking": ranking,
             }
         )
 
-    best_leg, _ = _minimize_candidate(
+    best_leg, _ = _minimize_objective(
         candidates,
         (_build_path_capacity_constraint(loads),),
     )
     return best_leg
-

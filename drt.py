@@ -41,6 +41,17 @@ class DrtEvent:
     request: TripRequest
     event_type: str
 
+@dataclass(frozen=True, slots=True)
+class DrtTrip:
+    trip_id: int
+    vehicle_id: int
+    start_time: float
+    end_time: float
+    start_location: GridNode
+    end_location: GridNode
+    request_ids: tuple[int, ...]
+    active_travel: float
+
 @dataclass(slots=True)
 class DrtVehicleState:
     current_location: GridNode
@@ -53,6 +64,161 @@ class DrtVehicleState:
     committed_onboard: float = 0.0
     committed_active_travel: float = 0.0
     has_departed: bool = False
+    active_trip_id: int | None = None
+    active_trip_vehicle_id: int | None = None
+    active_trip_start_time: float | None = None
+    active_trip_start_location: GridNode | None = None
+    active_trip_start_active_travel: float = 0.0
+    active_trip_request_ids: set[int] = field(default_factory=set)
+    completed_trips: list[DrtTrip] = field(default_factory=list)
+
+def _state_has_active_trip(state: DrtVehicleState) -> bool:
+    return state.active_trip_id is not None
+
+
+def _state_is_idle(state: DrtVehicleState) -> bool:
+    return not state.pending_events and not state.onboard_requests
+
+
+def _event_request_ids(events: list[DrtEvent]) -> set[int]:
+    return {event.request.request_id for event in events}
+
+
+def _trip_start_time_from_evaluation(
+    evaluation: dict[str, Any],
+    fallback_time: float,
+) -> float:
+    event_records = evaluation.get("events", ())
+    if not event_records:
+        return float(fallback_time)
+    first_record = event_records[0]
+    return float(first_record["event_time"]) - float(
+        first_record.get("active_travel_increment", 0.0)
+    )
+
+
+def _start_drt_trip(
+    state: DrtVehicleState,
+    *,
+    trip_id: int,
+    vehicle_id: int,
+    start_time: float,
+    start_location: GridNode,
+    request_ids: set[int],
+) -> None:
+    state.active_trip_id = int(trip_id)
+    state.active_trip_vehicle_id = int(vehicle_id)
+    state.active_trip_start_time = float(start_time)
+    state.active_trip_start_location = start_location
+    state.active_trip_start_active_travel = float(state.committed_active_travel)
+    state.active_trip_request_ids = set(request_ids)
+    state.has_departed = True
+
+
+def _add_drt_trip_request_ids(
+    state: DrtVehicleState,
+    request_ids: set[int],
+) -> None:
+    state.active_trip_request_ids.update(request_ids)
+
+
+def _project_open_drt_trip(
+    state: DrtVehicleState,
+    vehicle_id: int,
+) -> DrtTrip | None:
+    if state.active_trip_id is None:
+        return None
+    pending_evaluation = state.pending_evaluation or {}
+    end_time = float(pending_evaluation.get("completion_time", state.current_time))
+    end_location = pending_evaluation.get("completion_location", state.current_location)
+    active_travel_total = float(state.committed_active_travel) + float(
+        pending_evaluation.get("active_travel", 0.0)
+    )
+    return DrtTrip(
+        trip_id=int(state.active_trip_id),
+        vehicle_id=int(
+            state.active_trip_vehicle_id
+            if state.active_trip_vehicle_id is not None
+            else vehicle_id
+        ),
+        start_time=float(
+            state.active_trip_start_time
+            if state.active_trip_start_time is not None
+            else state.current_time
+        ),
+        end_time=end_time,
+        start_location=(
+            state.active_trip_start_location
+            if state.active_trip_start_location is not None
+            else state.current_location
+        ),
+        end_location=end_location,
+        request_ids=tuple(sorted(state.active_trip_request_ids)),
+        active_travel=max(
+            0.0,
+            active_travel_total - float(state.active_trip_start_active_travel),
+        ),
+    )
+
+
+def _close_drt_trip(
+    state: DrtVehicleState,
+    vehicle_id: int,
+    *,
+    end_time: float,
+    end_location: GridNode,
+    active_travel_total: float,
+) -> None:
+    trip = _project_open_drt_trip(state, vehicle_id)
+    if trip is None:
+        return
+    state.completed_trips.append(
+        DrtTrip(
+            trip_id=trip.trip_id,
+            vehicle_id=trip.vehicle_id,
+            start_time=trip.start_time,
+            end_time=float(end_time),
+            start_location=trip.start_location,
+            end_location=end_location,
+            request_ids=trip.request_ids,
+            active_travel=max(
+                0.0,
+                float(active_travel_total)
+                - float(state.active_trip_start_active_travel),
+            ),
+        )
+    )
+    state.active_trip_id = None
+    state.active_trip_vehicle_id = None
+    state.active_trip_start_time = None
+    state.active_trip_start_location = None
+    state.active_trip_start_active_travel = 0.0
+    state.active_trip_request_ids.clear()
+
+
+def _drt_trips_by_state(
+    vehicle_states: dict[int, DrtVehicleState],
+) -> list[DrtTrip]:
+    trips: list[DrtTrip] = []
+    for vehicle_id, state in vehicle_states.items():
+        trips.extend(state.completed_trips)
+        open_trip = _project_open_drt_trip(state, vehicle_id)
+        if open_trip is not None:
+            trips.append(open_trip)
+    return trips
+
+
+def _max_concurrent_trips(trips: list[DrtTrip]) -> int:
+    timeline: list[tuple[float, int]] = []
+    for trip in trips:
+        timeline.append((float(trip.start_time), 1))
+        timeline.append((float(trip.end_time), -1))
+    concurrent = 0
+    max_concurrent = 0
+    for _, delta in sorted(timeline, key=lambda item: (item[0], item[1])):
+        concurrent += delta
+        max_concurrent = max(max_concurrent, concurrent)
+    return int(max_concurrent)
 
 def _drt_state_totals(
     vehicle_states: dict[int, DrtVehicleState],
@@ -74,7 +240,9 @@ def _drt_state_totals(
         total_travel_distance += state.committed_active_travel + float(
             state.pending_evaluation["active_travel"]
         )
-        total_departures += float(state.has_departed)
+        total_departures += float(
+            len(state.completed_trips) + int(_state_has_active_trip(state))
+        )
 
     return {
         "wait": total_wait,
@@ -329,3 +497,11 @@ def _advance_drt_vehicle_state(
         onboard_requests=state.onboard_requests,
         onboard_pickup_times=state.onboard_pickup_times,
     )
+    if _state_is_idle(state):
+        _close_drt_trip(
+            state,
+            -1,
+            end_time=float(state.current_time),
+            end_location=state.current_location,
+            active_travel_total=float(state.committed_active_travel),
+        )
