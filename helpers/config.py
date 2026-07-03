@@ -4,18 +4,33 @@ from dataclasses import dataclass,field
 from datetime import datetime
 from pathlib import Path
 
+from helpers.types import GridNode, NetworkNode
+
 
 
 #######     main.py     ########
 @dataclass(frozen=True, slots=True)         #Class named in pascal case
 class Config:  
-    output_dir = Path(__file__).resolve().parent / "rs" #路径
-    date = datetime.now().strftime("%y%m%d_%H%M") #日期字符串         
-    base_seed: int = 20260601
-    seed_count: int = 1 #生成不同的随机需求，用来做重复实验、降低随机性的影响
+    ##### scenario parameters
+    lambdas: Sequence[int]  # hourly demand intensity（每小时需求强度）
+    hs: tuple[float]  # spatial 
+    ht: tuple[float]  # temporal
+    replication: bool  #是否复现
+    sc: int # 场景选择：1-需求场景，2-成本场景
     pre_alpha: float = 0.5 # prebooking rate
-    replication: bool = False #是否复现
-    sc: int = 1 # 场景选择：1-需求场景，2-成本场景
+    span: int = 180 # 时间范围 （time horizon / simulation horizon） /minutes       from7:00 to 19:00
+    peaks: tuple[int, ...] = (6, 12)
+    peak_width_minutes: int = 3 # Gaussian peak width（高斯峰宽）
+    o_hotspot: tuple[int, int] = (2, 2) 
+    d_hotspot: tuple[int, int] = (7, 7)    
+    ##### 导出设定
+    output_dir = Path(__file__).resolve().parents[1]/ "rs" #路径
+    date = datetime.now().strftime("%y%m%d_%H%M") #日期字符串 
+    ##### 重复设定        
+    base_seed: int = 20260601
+    seed_count: int = 2 # 生成不同的随机需求，用来做重复实验、降低随机性的影响
+    ##### pedestrian parameter
+    walk_speed: float = 70  # m/minute
     @property
     def scene(self):
         if self.sc == 1:
@@ -23,80 +38,34 @@ class Config:
         elif self.sc == 2:
             return "co"
         return None
-    
-    o_hotspot: tuple[int, int] = (20, 20) 
-    d_hotspot: tuple[int, int] = (70, 70)
-    peaks: tuple[int, ...] = (6, 60)
-    peak_width_minutes: int = 3 # Gaussian peak width（高斯峰宽）
 
-    span: int = 72 # 时间范围 （time horizon / simulation horizon） /minutes       from7:00 to 19:00
-    lambdas: Sequence[int] = tuple(range(10, 100, 20)) # hourly demand intensity（每小时需求强度）
-    hs: tuple[float] = (0.5,) # 空间异质性（spatial heterogeneity）
-    ht: tuple[float] = (0.5,) # 时间异质性（temporal heterog.eneity）tuple(i/10 for i in range(0, 11))
     service_policy: str = "strict"  #strict/skip
     modes = {
-    1: "fixed_route",
-    2: "deviated_route",
-    3: "drt_rolling_horizon",
-    4: "hub_and_spoke",
+    1: "fixed",
+    2: "deviated",
+    3: "drt",
+    4: "hub_spoke",
     }
-    max_dev: float = 0.5        # mode2 deviation
-    spoke_order = ("north", "east", "south", "west") # pending
 
 @dataclass(frozen=True, slots=True)
 class Grid:
     _type: str
     grid: int # size
-    grid_len: int # kilos, e.g., 10 for 100x100 grid
+    grid_len: int # m
     num_routes: int
-    #TODO
-    # route design parameters
-    x_margin: int = 10
-    y_margin: int = 20
-    half_route_height: int = 10    
     @property
-    def routes(self): 
-        x_left = self.x_margin
-        x_mid = self.grid // 2
-        x_right = self.grid - self.x_margin
-        y_lower = self.half_route_height
-        y_upper = self.grid - 1 - self.half_route_height
-        if self.num_routes == 1:
-            y_centres = (self.grid // 2,)
-        else:
-            spacing = (y_upper - y_lower) / (self.num_routes - 1)
-            y_centres = tuple(
-                round(y_lower + i * spacing)
-                for i in range(self.num_routes)
-            )
-
-        return tuple(
-            (
-                (x_left, y),
-                (x_left, y + self.half_route_height),
-                (x_mid, y + self.half_route_height),
-                (x_right, y + self.half_route_height),
-                (x_right, y),
-                (x_right, y - self.half_route_height),
-                (x_mid, y - self.half_route_height),
-                (x_left, y - self.half_route_height),
-            )
-            for y in y_centres
-        )
-    @property
-    def hub(self): 
-        return (self.grid // 2, self.grid // 2)
+    def hub(self):
+        return (0, self.grid // 2)
+    max_dev: float = 5        # mode2 deviation 多少个grid edge
 
     
 
 @dataclass(frozen=True, slots=True)
 class Radial:
-    _type: str
+    # _type: str
     spoke_count: int
     ring_radial: tuple[float, ...] # (5, 10, 15)
-    # max_dev: float = 0.5
     #TODO
-    # route design parameters
     
     routes: tuple[tuple[object, ...], ...] = (
         (
@@ -145,11 +114,12 @@ class Radial:
         return self.hub_spoke_hub
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=False, slots=True)
 class Fleet:
-    num: int
     cap: int
-    freq: int = 20 # 车辆发车频率（分钟/车）
+    num: int = 0
+    freq: int = 40 # 车辆发车频率（分钟/车）
+    speed: float = 500 # 车辆速度（m/minute）30km/h
     multi_sizes: tuple[int, ...] = (3, 6, 9, 12, 15)
     multi_cap: tuple[int, ...] = (15, 30, 45)
 # scenarios_num= len(LAMBDA_LEVELS) * len(HS_LEVELS) * len(HT_LEVELS)
@@ -203,7 +173,7 @@ class ModeAccumulator:
     total_walk: float = 0.0
     total_onboard: float = 0.0
     total_travel_distance: float = 0.0
-    total_departures: int = 0
+    total_trips: int = 0
     net_expenditure: float = 0.0
     total_trips: int | None = None
     max_concurrent_trips: int | None = None
@@ -216,10 +186,6 @@ class TripRequest:
     origin: NetworkNode
     destination: NetworkNode
     departure_time: int
-    request_type: str = "real_time"
+    request_type: int # "pre_booking" = 1
 
-num_routes = 4
-config = Config(lambdas = tuple(range(5, 500, 5)), hs = (0.2,0.5,0.8), ht = (0.2,0.5,0.8), replication = False, sc = 1) # 场景选择：1-需求场景，2-成本场景
-nets = Grid(_type = 'grid', grid = 100, grid_len = 1, num_routes = num_routes, x_margin = 10, y_margin = 10)
-# nets = Radial(_type = "hub_spoke", spoke_count = 8, ring_radial = (5, 10, 15))
-fleet = Fleet(num = num_routes*2, cap = 30)
+

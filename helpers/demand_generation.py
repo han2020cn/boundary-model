@@ -1,18 +1,16 @@
 from __future__ import annotations
 import json
 import math
-from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any
 import networkx as nx
 import numpy as np
 from pathlib import Path
 import pandas as pd
 
-import netx as net
+import helpers.netx as net
 import plt_draw as plt
-from config import TripRequest
-NetworkNode = Any # type alias: network node（网络节点）
+from helpers.config import TripRequest
+from helpers.types import NetworkNode
 
 
 def _weights_normalize(weights: np.ndarray) -> np.ndarray: # 归一化权重
@@ -22,28 +20,11 @@ def _weights_normalize(weights: np.ndarray) -> np.ndarray: # 归一化权重
     return weights / total
 
 
-def _weights_hotspot(nodes: list[NetworkNode], hotspot: NetworkNode) -> np.ndarray: # 计算每个节点到热点的曼哈顿距离，并将距离转换为权重，距离越近权重越大
-    distances = np.array(
-        [abs(node[0] - hotspot[0]) + abs(node[1] - hotspot[1]) for node in nodes],
-        dtype=float,
-    )
-    return np.exp(-0.3 * distances)
-
-
 def _weights_network_hotspot(
     graph: nx.Graph,
     nodes: list[NetworkNode],
     hotspot: NetworkNode,
 ) -> np.ndarray:
-    if hotspot in graph:
-        lengths = nx.single_source_dijkstra_path_length(
-            graph,
-            hotspot,
-            weight="weight",
-        )
-        distances = np.array([float(lengths[node]) for node in nodes], dtype=float)
-        return np.exp(-0.3 * 0.1 * distances) # 将距离转换为权重，距离越近权重越大
-
     positions = nx.get_node_attributes(graph, "pos")
     if (
         isinstance(hotspot, (tuple, list))
@@ -59,7 +40,7 @@ def _weights_network_hotspot(
             ],
             dtype=float,
         )
-        return np.exp(-0.3 * distances)
+        return np.exp(-0.3 * distances) # 将距离转换为权重，距离越近权重越大
 
     return np.full(len(nodes), 1.0 / len(nodes), dtype=float)
 
@@ -88,16 +69,18 @@ def _weights_build_temporal(config, heterogeneity: float) -> np.ndarray:
     return _weights_normalize(mixed)
 
 
-def _requests_generate(
+def requests_generate(
     config,
     nets,
     scenario: dict,
     network_context=None,
+    *,
+    fixed_seed: bool,
 ) -> list[TripRequest]:
     rng = np.random.default_rng(int(scenario["seed"]))
     lambda_per_hour = float(scenario["lambda"]) # 每小时需求强度（demand intensity per hour）
     mean_count = lambda_per_hour * config.span / 60.0       # 计算在给定时间范围内的平均请求数量（mean request count over the time horizon）
-    request_count = int(rng.poisson(lam=mean_count))
+    request_count = int(rng.poisson(lam=mean_count))    
     if request_count <= 0:
         raise ValueError("No request generated")
 
@@ -105,7 +88,7 @@ def _requests_generate(
     if len(nodes) < 2:
         raise ValueError("request generation requires at least two request nodes")
 
-    #目前的空间衰减exp(-0.3 * 0.1 * distances)
+    #目前的空间衰减exp(coefficient* distances)
     origin_hotspot_weights = _weights_network_hotspot(
         network_context.graph,
         nodes,
@@ -134,6 +117,12 @@ def _requests_generate(
     temporal_weights = _weights_build_temporal(config, float(scenario["ht"]))
 
     requests: list[TripRequest] = []
+    # 预订请求占比由prebooking_alpha控制
+    prebooking_count = int(config.pre_alpha * request_count)
+    prebooking_indices = set(
+        int(index)
+        for index in rng.choice(request_count, size=prebooking_count, replace=False)
+    )
     for request_id in range(request_count):
         origin_index = int(rng.choice(node_indices, p=origin_weights))
         destination_index = int(rng.choice(node_indices, p=destination_weights))
@@ -141,40 +130,23 @@ def _requests_generate(
             destination_index = int(rng.choice(node_indices, p=destination_weights))
 
         departure_time = int(rng.choice(minute_indices, p=temporal_weights))
+        request_type = 1 if request_id in prebooking_indices else 0
         requests.append(
             TripRequest(
                 request_id=request_id,
                 origin=nodes[origin_index],
                 destination=nodes[destination_index],
                 departure_time=departure_time,
+                request_type = request_type,
             )
         )
+
     print(f"Generated {len(requests)} requests with lambda={lambda_per_hour}, hs={scenario['hs']}, ht={scenario['ht']}")
-    plt._draw_request(requests, nets, Path(__file__).resolve().parent / "rs"/"requests")
+    date = datetime.now().strftime("%m%d_%H%M%S")
+    request_dir = Path(__file__).resolve().parents[1] / "rs" / "requests"
+    plt._draw_request(requests, nets, request_dir, date)
+    _requests_save(requests, request_dir, date)
     return sorted(requests, key=lambda request: (request.departure_time, request.request_id))
-
-
-def _request_types_assign(
-    requests: list[TripRequest],
-    alpha: float,
-    seed: int | None,
-) -> list[TripRequest]:
-    prebooking_count = int(np.floor(float(np.clip(alpha, 0.0, 1.0)) * len(requests)))
-    if prebooking_count <= 0:
-        return [replace(request, request_type="real_time") for request in requests]
-
-    rng = np.random.default_rng(seed)
-    prebooking_indices = set(
-        int(index)
-        for index in rng.choice(len(requests), size=prebooking_count, replace=False)
-    )
-    typed_requests = []
-    for index, request in enumerate(requests):
-        request_type = "pre_booking" if index in prebooking_indices else "real_time"
-        typed_requests.append(replace(request, request_type=request_type))
-    return typed_requests
-
-
 
 
 def _requests_save(
@@ -183,8 +155,8 @@ def _requests_save(
     date: str,
 ) -> Path:
     file_name = f"requests_{date}.json"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "requests" / file_name
+    output_dir.mkdir(parents=True, exist_ok=True)   #确保输出目录存在
+    output_path = output_dir / file_name
     records = [
         {
             "request_id": request.request_id,
@@ -212,7 +184,7 @@ def load_requests(path: Path) -> list[TripRequest]:
             origin=_record_to_node(record["origin"]),
             destination=_record_to_node(record["destination"]),
             departure_time=int(record["departure_time"]),
-            request_type=str(record.get("request_type", "real_time")),
+            request_type=int(record["request_type"]),
         )
         for record in records
     ]
@@ -226,7 +198,7 @@ def _record_to_node(value): # 将记录中的节点表示转换回网络节点�
 def avg_served(frame: pd.DataFrame, division: pd.DataFrame, ac_rate: str| None = None) -> pd.DataFrame:
     # 计算平均服务指标：平均净支出、平均服务时间，以及如果指定了接受率计算，则计算接受率
     plot_frame = frame.copy()
-    served_num = plot_frame["served_requests"]
+    served_num = plot_frame["total_requests"] - plot_frame["unserved_requests"]
     plot_frame["avg_net_expenditure"] = (division.iloc[:, 0] / served_num).fillna(0.0)
     plot_frame["avg_service_time"] = (division.iloc[:, 1] / served_num).fillna(0.0)
     if ac_rate == "acceptance":

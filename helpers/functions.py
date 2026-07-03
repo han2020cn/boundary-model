@@ -158,27 +158,17 @@ def draw_loops(loops, output_dir: Path | None = None) -> Path: # 绘制所有路
     if not loop_items:
         raise ValueError("draw_loops requires at least one loop")
 
-    output_path = Path(output_dir or Path(__file__).resolve().parent / "rs" / "loops")
-    output_path.mkdir(parents=True, exist_ok=True)
-    png_path = output_path / "loops.png"
-
+    output_dir.mkdir(parents=True, exist_ok=True)
+    png_path = output_dir / "loops.png"
     fig, ax = plt.subplots(figsize=(8, 8))
-    colors = plt.colormaps.get_cmap("tab10")
 
     for index, loop in enumerate(loop_items):
         stops = tuple(loop.fixed_stop_indices.keys())
         if len(stops) < 2:
             continue
-
         closed_stops = stops + (stops[0],)
         xs, ys = zip(*(_node_xy(stop) for stop in closed_stops))
-        # route_id = getattr(loop, "route_id", f"route_{index + 1}")
-        # color = colors(index % 10)
-
         ax.plot(xs, ys, marker="o", linewidth=2.0, markersize=4.0)
-        # for stop_index, stop in enumerate(stops, start=1):
-        #     x_value, y_value = _node_xy(stop)
-        #     ax.text(x_value, y_value, f"{route_id}:{stop_index}", fontsize=7, color=color)
 
     ax.set_title("Loop Routes")
     ax.set_xlabel("x")
@@ -188,12 +178,12 @@ def draw_loops(loops, output_dir: Path | None = None) -> Path: # 绘制所有路
     # ax.legend(loc="best", framealpha=0.88)
     fig.tight_layout()
     fig.savefig(png_path, dpi=300, bbox_inches="tight")
-    # plt.show(fig)
-    plt.close(fig)
+    plt.show()
+    # plt.close(fig)
     return png_path
 
 
-def _node_xy(node) -> tuple[float, float]:
+def _node_xy(node) -> tuple[float, float]:  # 将节点转换为(x, y)坐标，如果节点是一个包含两个数值的元组，则返回这些数值作为坐标，否则抛出ValueError异常
     if (
         isinstance(node, tuple)
         and len(node) == 2

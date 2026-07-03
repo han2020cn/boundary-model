@@ -1,52 +1,41 @@
 from __future__ import annotations
 
 import pandas as pd
-from datetime import datetime
 
-from pathlib import Path
 import scenarios as sc
-import demand_generation as dg
-import functions as fs
+import helpers.functions as fs
 #导入class
-from config import config, nets, fleet
+from helpers.config import Config, Grid, Radial, Fleet
 
+# 场景选择：1-需求场景，2-成本场景
+config = Config(lambdas = tuple(range(10, 90, 20)), hs = (0.2,0.8), ht = (0.2,0.8), replication = False, sc = 1) 
+nets = Grid(_type = 'grid', grid = 10, grid_len = 100, num_routes = 2)
+# nets = Radial(_type = "hub_spoke", spoke_count = 8, ring_radial = (5, 10, 15))
+fleet = Fleet(cap = 30)
 
-output_dir = config.output_dir
-date = config.date
-scene = config.scene
-
-def main(config, output_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
-    results_frame = None
-    results = output_dir / "de_result_260601_1214.json"  
-    if scene ==  "de":
-        requests, results_frame = sc.demand_scenarios(config, nets, fleet, output_dir,          
+def main(config) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if config.scene ==  "de":
+        requests, results_frame = sc.demand_scenario(config, nets, fleet,          
                                      )
-    if scene ==  "co":
-        requests, results_frame = sc.cost_scenarios(config, nets, fleet, output_dir,
+    if config.scene ==  "co":
+        requests, results_frame = sc.cost_scenario(config, nets, fleet,
                                      )
-        
-    if results_frame is not None:
-        results = results_frame      
-    
-    optimals_frame = sc.optimals(results)
+    return results_frame
 
-    fs.export_json(optimals_frame, output_dir / f"{scene}_optimal_{date}.json")
-
-    return results_frame, optimals_frame
-
-
+def local_result() -> pd.DataFrame:
+    file_name = "de_result_260602_1927.json"
+    results_path = config.output_dir / file_name
+    sc, result_type, config.date, time = file_name.removesuffix(".json").split("_")
+    optimals_results = sc.optimals(results_path)
+    optimals_path = config.output_dir / f"{sc}_optimal_{config.date}_{time}.json"
+    fs.export_json(optimals_results, optimals_path)
 
 
 if __name__ == "__main__":
-        
-    results_frame, optimals_frame = main(config, output_dir)
-    # tem_dir = Path(__file__).resolve().parent /"rs" 
-    # results_frame = pd.read_json(tem_dir / "de_result_260528_1623.json")
     
-    ##画出请求的起点和终点分布图
-    # plt._draw_request(f"requests_{date}.json", nets, output_dir/"requests")     #requests文件名，保存路径
-    #f"requests_{date}.json"
-
+    main(config)
+    # fs.transfer_json_to_excel(config.output_dir/"de_result_260608_1559.json")
+    
     # print("Processing complete.")
     # input("Press Enter to continue...")
     # print("Continuing program...")

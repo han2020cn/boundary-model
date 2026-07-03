@@ -2,11 +2,11 @@ import math
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Hashable
+
 
 import networkx as nx
-
-NetworkNode = Hashable
+import helpers.cal_route as cr
+from helpers.types import NetworkNode
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,11 +29,11 @@ def build_grid_graph(grid_size: int) -> nx.Graph:
     nx.set_edge_attributes(graph, 1, "weight")
     return graph
 
+"""Build an abstract radial-ring network with weighted spoke and ring edges."""
 def build_radial_ring_graph(
     spoke_count: int = 8,
     ring_radial: tuple[float, ...] = (5, 10, 15),
 ) -> nx.Graph:
-    """Build an abstract radial-ring network with weighted spoke and ring edges."""
     if spoke_count < 3:
         raise ValueError("spoke_count must be at least 3")
     if not ring_radial:
@@ -89,14 +89,12 @@ def build_radial_ring_graph(
 
     return graph
 
-
+"""Build graph and route configuration from the user-editable Nets class."""
 def build_network_context(nets) -> NetworkContext:
-    """Build graph and route configuration from the user-editable Nets class."""
     network_type = getattr(nets, "_type")
     if network_type == "grid":
         graph = build_grid_graph(int(nets.grid))
-        hub = getattr(nets, "grid_hub", getattr(nets, "hub", (4, 4)))
-        route_specs = getattr(nets, "grid_routes", None)
+        route_specs = cr.routes(nets)   
         if route_specs is None:
             route_specs = getattr(nets, "routes", None)
         if route_specs is None:
@@ -104,13 +102,12 @@ def build_network_context(nets) -> NetworkContext:
         request_nodes = tuple(graph.nodes)
     elif network_type == "hub_spoke":
         graph = build_radial_ring_graph(nets.spoke_count, nets.ring_radial)
-        hub = getattr(nets, "hub_spoke_hub", getattr(nets, "hub", "hub"))
         route_specs = getattr(nets, "hub_spoke_routes", None)
         if route_specs is None:
             route_specs = _legacy_hub_spoke_routes(nets)
         allow_hub_requests = bool(getattr(nets, "allow_hub_requests", False))
         request_nodes = tuple(
-            node for node in graph.nodes if allow_hub_requests or node != hub
+            node for node in graph.nodes if allow_hub_requests or node != nets.hub
         )
     else:
         raise ValueError("network_type must be 'grid' or 'hub_spoke'")
@@ -119,7 +116,7 @@ def build_network_context(nets) -> NetworkContext:
     context = NetworkContext(
         network_type=network_type,
         graph=graph,
-        hub=hub,
+        hub=nets.hub,
         routes=routes,
         request_nodes=tuple(request_nodes),
     )

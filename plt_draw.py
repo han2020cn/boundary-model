@@ -13,9 +13,9 @@ import pandas as pd
 
 import statsmodels.api as sm
 from statsmodels.nonparametric.smoothers_lowess import lowess
-import demand_generation as dg
-import netx as net
-import functions as fs
+import helpers.demand_generation as dg
+import helpers.netx as net
+import helpers.functions as fs
 
 
 # ===== 2. 为不同 mode_id 定义颜色 =====
@@ -41,13 +41,14 @@ COST_TRADEOFF_MARKERS = ("*", "X", "^", "D", "o", "s", "P")
 
 _DEFAULT_REGRESSION_TIMESTAMP: str | None = None
 
-# Draw request origin/destination points（请求起终点） on the network
+# Draw 请求起终点 on the network
 def _draw_request(
     input_file: str|list[TripRequest],
     nets,
     output_dir: Path | None = None,
+    date: str | None = None,
 ) -> Path:
-    png_name = f"distribution_{datetime.now().strftime('%m%d_%H%M%S')}.png" #png文件名
+    png_name = f"distribution_{date}.png" #png文件名
     if isinstance(input_file, list):
         requests = input_file
     else:
@@ -73,8 +74,8 @@ def _draw_request(
     axes[0].set_title("origins")
     axes[1].set_title("destinations")
     for ax in axes:
-        ax.set_xlim(-10, nets.grid+10)
-        ax.set_ylim(-10, nets.grid+10)
+        ax.set_xlim(-10 , nets.grid )
+        ax.set_ylim(-10 , nets.grid )
         ax.set_xlabel("x")
         ax.set_ylabel("y")
         ax.set_title(f"Request Origins and Destinations ({network_type})")
@@ -83,6 +84,7 @@ def _draw_request(
 
     plt.tight_layout()
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
     return output_path
 
 
@@ -114,7 +116,7 @@ def _grid_node_positions(graph, nets) -> dict: # 根据网格网络的节点坐�
             or not all(isinstance(value, (int, float)) for value in node)
         ):
             raise ValueError(f"grid node must be a numeric (x, y) tuple: {node!r}")
-        positions[node] = (float(node[0]) * grid_len, float(node[1]) * grid_len)
+        positions[node] = (float(node[0]), float(node[1]) )
     return positions
 
 
@@ -220,8 +222,8 @@ def plts_2d(
         show_lowess=show_lowess,
         confidence=confidence,
     )
-
-    if export_regression:
+    # 导出回归结果
+    if export_regression: 
         report_frame = fs._regression_report(
             frame,
             output_path,
@@ -329,18 +331,19 @@ def plts_2d_pair(
 
 
 def plts_cost_tradeoff(
-    frame: pd.DataFrame, 
+    x_key: str,
+    y_key: str,
+    frame: pd.DataFrame,
     output_dir: Path,
     date_stamp: str,
     fleet_sizes: Sequence[int] | None = None,
     config: Config | None = None,
-    x_key: str = "avg_net_expenditure",
-    y_key: str = "avg_service_time",
+
 ) -> Path:
     '''frame: pd.DataFrame
     "lambda",
     "mode_id",
-    "fleet_size",
+    "fleet_max",
     "avg_net_expenditure",
     "avg_service_time",
     '''
@@ -348,12 +351,25 @@ def plts_cost_tradeoff(
     outpng.parent.mkdir(parents=True, exist_ok=True)
 
     lambda_values = _ordered_values(frame, "lambda", config.lambdas)
-    fleet_values = _ordered_values(frame, "fleet_size", fleet_sizes)
+    ht_values = _ordered_values(frame, "ht", config.ht)
+    hs_values = _ordered_values(frame, "hs", config.hs)
+    fleet_values = _ordered_values(frame, "fleet_max", fleet_sizes)
     mode_values = _ordered_values(frame, "mode_id", config.modes)
-    lambda_colors = _value_color_map(lambda_values)
     fleet_markers = _fleet_marker_map(fleet_values)
+    color_specs = [
+    ("lambda", lambda_values, _value_color_map(lambda_values)),
+    ("ht", ht_values, _value_color_map(ht_values)),
+    ("hs", hs_values, _value_color_map(hs_values)),
+]
+    fig, axes = plt.subplots(1, 3, figsize=(12, 7),
+                           sharex=True, sharey=True)
+    fig.supxlabel("Unit expenditure (£/pax)")
+    fig.supylabel("Unit time (minutes/pax)")
+    fig.suptitle("Cost-time Tradeoff")
 
-    fig, ax = plt.subplots(figsize=(12, 7))
+    for ax in axes:
+        ax.grid(True, alpha=0.3)
+
     # #折线
     # for mode_id, group in frame.groupby("mode_id"):
     #     sorted_group = group.sort_values(by="lambda")
@@ -368,36 +384,29 @@ def plts_cost_tradeoff(
     #         zorder=2,
     #     )
     #散点
-    for fleet_size, group in frame.groupby("fleet_size"):
-        point_colors = group["lambda"].map(lambda value: lambda_colors[float(value)]).tolist() #根据 lambda 值映射颜色
-        ax.scatter(
-            group[x_key],
-            group[y_key],
-            c=point_colors,
-            marker=fleet_markers[int(fleet_size)],
-            s=72,
-            edgecolors="black",
-            linewidths=0.35,
-            alpha=0.95,
-            label="_nolegend_",
-            zorder=3,
+    for ax, (color_key, values, colors) in zip(axes, color_specs):
+        for fleet_size, group in frame.groupby("fleet_max"):
+            point_colors = group[color_key].map(colors).tolist()
+            ax.scatter(
+                group[x_key],
+                group[y_key],
+                c=point_colors,
+                marker=fleet_markers[int(fleet_size)],
+                s=72,
+                edgecolors="black",
+                linewidths=0.35,
+                alpha=0.95,
+                label="_nolegend_",
+                zorder=3,
+            )
+        _add_value_legends(
+            ax,
+            values=values,
+            colors=colors,
+            title=color_key,
         )
 
-    _add_cost_tradeoff_legends(
-        ax,
-        lambda_values = lambda_values,
-        lambda_colors = lambda_colors,
-        # mode_values = mode_values,
-        # fleet_values = fleet_values,
-        fleet_markers = fleet_markers,
-    )
-
-    ax.set_xlabel("Operator Unit Cost (£/pax)")
-    ax.set_ylabel("Passenger Unit Cost (minutes/pax)")
-    ax.set_title("Cost Tradeoff")
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout(rect=(0.0, 0.0, 0.78, 1.0))
+    plt.tight_layout()
     plt.savefig(outpng, dpi=600, bbox_inches="tight")
     plt.close(fig)
     return outpng
@@ -414,7 +423,7 @@ def _ordered_values(
 
     ordered_values = []
     for value in preferred_values:
-        candidate = float(value) if column == "lambda" else int(value)
+        candidate = float(value) 
         if candidate in present_values and candidate not in ordered_values:
             ordered_values.append(candidate)
     return ordered_values
@@ -437,38 +446,27 @@ def _fleet_marker_map(fleet_values: Sequence[int]) -> dict[int, str]:
     }
 
 
-def _add_cost_tradeoff_legends(
+def _add_value_legends(ax, values, colors, title) -> None:
+    handles = [
+        Line2D(
+            [],
+            [],
+            color=colors[value],
+            linestyle="-",
+            linewidth=2.0,
+            label=f"{title} = {_format_number(value)}",
+        )
+        for value in values
+    ]
+    ax.legend(handles=handles, title=title)
+
+
+def _add_mode_legends(
     ax,
-    lambda_values: Sequence | None = None,
-    lambda_colors: dict | None = None,
     mode_values: Sequence[int] | None = None,
-    fleet_values: Sequence[int] | None = None,
-    fleet_markers: dict[int, str] | None = None,
 ) -> None:
     fig = ax.figure
     legend_x = 0.90
-    if lambda_values is not None:
-        lambda_handles = [
-            Line2D(
-                [],
-                [],
-                color=lambda_colors[lambda_value],
-                linestyle="-",
-                linewidth=2.0,
-                label=f"λ = {_format_number(lambda_value)} requests/h",
-            )
-            for lambda_value in lambda_values
-        ]
-        fig.legend(
-            handles=lambda_handles,
-            title="lambda",
-            loc="upper left",
-            bbox_to_anchor=(legend_x, 0.48),
-            bbox_transform=fig.transFigure,
-            borderaxespad=0.0,
-            framealpha=0.88,
-            fontsize=8,
-        )
     if mode_values is not None:
         mode_handles = [
             Line2D(
@@ -491,6 +489,14 @@ def _add_cost_tradeoff_legends(
             framealpha=0.88,
             fontsize=8,
         )
+
+def _add_fleet_legends(
+    ax,
+    fleet_values: Sequence[int] | None = None,
+    fleet_markers: dict[int, str] | None = None,
+) -> None:
+    fig = ax.figure
+    legend_x = 0.90
     if fleet_values is not None:
         fleet_handles = [
             Line2D(
@@ -508,7 +514,7 @@ def _add_cost_tradeoff_legends(
     ]
         fig.legend(
             handles=fleet_handles,
-            title="fleet_size",
+            title="fleet_max",
             loc="upper left",
             bbox_to_anchor=(legend_x, 0.92),
             bbox_transform=fig.transFigure,
@@ -516,7 +522,6 @@ def _add_cost_tradeoff_legends(
             framealpha=0.88,
             fontsize=8,
         )
-
 
 def _format_number(value) -> str:
     numeric_value = float(value)
@@ -574,7 +579,7 @@ def _draw_2d_scatter(
         group_key = tuple(row[type_key] for type_key in types)
         grouped_records.setdefault(group_key, []).append(row)
 
-    for group_key, group_records in grouped_records.items():
+    for group_key, group_records in grouped_records.items(): #row[x_key]
         x_values = [float(row[x_key]) for row in group_records]
         y_values = [float(row[y_key]) for row in group_records]
         scatter_kwargs = {
@@ -1256,19 +1261,14 @@ def draw_section(
     return 
 
 #导入class
-from config import config
+from main import config
 
 if __name__ == "__main__":    
     results_dir = Path(__file__).resolve().parent /"rs" 
-    result_file = results_dir / "de_optimal_260601_1545.json" # 路径
-    date_stamp = result_file.stem.removeprefix("de_optimal_")
+    result_file = results_dir / "de_optimal_260630_1337.json" # 路径
+    parts = result_file.stem.split("_")
+    date_stamp = "_".join(parts[-2:])
     results_frame = pd.read_json(result_file) 
-    
-    x = "served_requests"
-    x1 = "served_requests"
-    y = "avg_net_expenditure"
-    y1 = "avg_service_time"
-    z = "lambda"
     types = ["mode_id"] 
     # plot_columns = [
     #     "mode_id",
@@ -1278,45 +1278,47 @@ if __name__ == "__main__":
     # ]
     
     a = results_frame[["net_expenditure", "total_service_time"]].copy() # dividend
-
-    fr_plot1 = dg.avg_served(results_frame, a, "acceptance") #计算请求的平均值
+    #计算请求的平均值
+    fr_plot1 = dg.avg_served(results_frame, a, "acceptance") 
     
     # fs.json_to_excel(output_dir/ "1_rs_260519_2037.json")
-    output_dir = Path(__file__).resolve().parent / "rs"/"rs_new" #路径
-    plts_2d(fr_plot1,output_dir,date_stamp,y,y1,types)
+    output_dir = Path(__file__).resolve().parent / "rs"/"rs_plot" #路径
+    plts_2d(fr_plot1,output_dir,date_stamp,"avg_net_expenditure","avg_service_time",types)
     plts_2d_pair(   #画图 #plts_3d xyz图, plts_2d xy图, plts_4s 2x2图
         fr_plot1,
         fr_plot1,
         output_dir,
         date_stamp,
-        x,
-        x1,
-        y,
-        y1,
+        "served_requests",
+        "served_requests",
+        "avg_net_expenditure",
+        "avg_service_time",
         types,
-        left_title=y,
-        right_title=y1,
+        left_title="avg_net_expenditure",
+        right_title="avg_service_time",
         prebooking_alpha=config.pre_alpha,
     ) 
     
 
     fr_plot2 = dg.avg_served(results_frame, a, "acceptance") #计算请求的平均值
-    plts_cost_tradeoff(fr_plot2, output_dir, date_stamp, config = config )
+    plts_cost_tradeoff("avg_net_expenditure","avg_service_time", fr_plot2, output_dir, date_stamp, config = config )
     if "optimal" in str(result_file): # 如果是最优解的结果文件，则画 3D 图和需求图
-        offset = False,
+        offset = True
+        demand_3d(fr_plot2, output_dir, date_stamp, "ht", "hs", "lambda", offset)
+        draw_section(
+        fr_plot2,
+        "ht",
+        "hs",
+        "lambda",
+        offset,
+        )
     else:
         offset = True
     
-    plts_3d(fr_plot2, output_dir, date_stamp, "avg_net_expenditure", "avg_service_time", "lambda", offset)
-    demand_3d(fr_plot2, output_dir, date_stamp, "ht", "hs", "lambda", offset)
-    draw_section(
-    fr_plot2,
-    "ht",
-    "hs",
-    "lambda",
-    offset,
-    )
+    plts_3d(fr_plot2, output_dir, date_stamp, "avg_net_expenditure", "avg_service_time", "lambda", offset)  
+    
 
-    print("Processing complete.")
-    input("Press Enter to continue...")
-    print("Continuing program...")
+
+    # print("Processing complete.")
+    # input("Press Enter to continue...")
+    # print("Continuing program...")

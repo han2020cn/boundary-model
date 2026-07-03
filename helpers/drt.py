@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 import networkx as nx
 
-from demand_generation import TripRequest
+from helpers.config import TripRequest
+from helpers.types import CandidateConstraint, GridNode
 
 
-NetworkNode = Any # type alias: network node（网络节点）
-GridNode = NetworkNode
-CandidateConstraint = Callable[[dict[str, Any]], str | None]
 DISTANCE_CACHE_KEY = "_boundary_model_shortest_path_lengths"
 
 
@@ -80,11 +78,11 @@ def _state_is_idle(state: DrtVehicleState) -> bool:
     return not state.pending_events and not state.onboard_requests
 
 
-def _event_request_ids(events: list[DrtEvent]) -> set[int]:
+def event_request_ids(events: list[DrtEvent]) -> set[int]:
     return {event.request.request_id for event in events}
 
 
-def _trip_start_time_from_evaluation(
+def trip_start_time_from_evaluation(
     evaluation: dict[str, Any],
     fallback_time: float,
 ) -> float:
@@ -120,6 +118,33 @@ def _add_drt_trip_request_ids(
     request_ids: set[int],
 ) -> None:
     state.active_trip_request_ids.update(request_ids)
+
+
+def start_or_update_trip(
+    vehicle_states: dict[int, DrtVehicleState],
+    vehicle_id: int,
+    evaluation: dict[str, Any],
+    schedule: list[DrtEvent],
+    next_trip_id: int,
+) -> int:
+    state = vehicle_states[vehicle_id]
+    request_ids = event_request_ids(schedule)
+    if _state_has_active_trip(state):
+        _add_drt_trip_request_ids(state, request_ids)
+        return next_trip_id
+
+    _start_drt_trip(
+        state,
+        trip_id=next_trip_id,
+        vehicle_id=vehicle_id,
+        start_time=trip_start_time_from_evaluation(
+            evaluation,
+            state.current_time,
+        ),
+        start_location=state.current_location,
+        request_ids=request_ids,
+    )
+    return next_trip_id + 1
 
 
 def _project_open_drt_trip(
@@ -226,7 +251,7 @@ def _drt_state_totals(
     total_wait = 0.0
     total_onboard = 0.0
     total_travel_distance = 0.0
-    total_departures = 0.0
+    total_trips = 0.0
 
     for state in vehicle_states.values():
         total_wait += state.committed_wait + _sum_evaluation_metric(
@@ -240,7 +265,7 @@ def _drt_state_totals(
         total_travel_distance += state.committed_active_travel + float(
             state.pending_evaluation["active_travel"]
         )
-        total_departures += float(
+        total_trips += float(
             len(state.completed_trips) + int(_state_has_active_trip(state))
         )
 
@@ -248,7 +273,7 @@ def _drt_state_totals(
         "wait": total_wait,
         "onboard": total_onboard,
         "travel_distance": total_travel_distance,
-        "departures": total_departures,
+        "trip": total_trips,
     }
 
 
@@ -421,6 +446,24 @@ def _build_drt_capacity_constraint(fleet: Any) -> CandidateConstraint:
         return "capacity_limit"
 
     return constraint
+
+
+def advance_vehicle_states(
+    vehicle_states: dict[int, DrtVehicleState],
+    planning_time: int,
+    graph: nx.Graph,
+    nets: Any,
+    fleet: Any,
+) -> None:
+    for state in vehicle_states.values():
+        _advance_drt_vehicle_state(
+            state,
+            planning_time,
+            graph,
+            nets,
+            fleet,
+        )
+
 
 # 这个函数用于根据当前的DRT车辆状态和规划时间来推进车辆状态，处理已经发生的事件，并更新当前时间、位置、车上请求等信息
 def _advance_drt_vehicle_state(
