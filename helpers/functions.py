@@ -1,5 +1,7 @@
 import json
+import os
 from pathlib import Path
+import tempfile
 import pandas as pd
 from datetime import date, datetime
 import statsmodels.api as sm
@@ -36,13 +38,31 @@ def transfer_json_to_excel(file_path: Path) -> Path:
     return output_path
 
 
-def export_json(frame: pd.DataFrame, output_path: Path) ->  Path:
-
-    json_records = json.loads(frame.to_json(orient="records"))
-    with output_path.open("w", encoding="utf-8") as handle:
-        json.dump(json_records, handle, ensure_ascii=False, indent=2)
-
+def write_json(data, output_path: Path) -> Path:
+    """Atomically write JSON data, creating the parent directory as needed."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{output_path.name}.",
+        suffix=".tmp",
+        dir=output_path.parent,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, output_path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
     return output_path
+
+
+def export_json(frame: pd.DataFrame, output_path: Path) -> Path:
+    json_records = json.loads(frame.to_json(orient="records"))
+    return write_json(json_records, output_path)
 
 
 def extend_json(frame: pd.DataFrame, output_path: Path,
@@ -55,10 +75,7 @@ def extend_json(frame: pd.DataFrame, output_path: Path,
         records = []
 
     records.extend(json.loads(frame.to_json(orient="records")))
-    with output_path.open("w", encoding="utf-8") as handle:
-        json.dump(records, handle, ensure_ascii=False, indent=2)
-
-    return output_path
+    return write_json(records, output_path)
 
 
 MODE_LABELS = {

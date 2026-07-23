@@ -6,16 +6,27 @@ from helpers.config import ModeAccumulator, TripRequest
 from helpers.types import CandidateConstraint, Scenario
 
 
-REFUSAL_PENALTY = 0.0
+REFUSAL_PENALTY = 100.0
+VEHICLE_OPERATING_COST_PER_HOUR = 40.0
 
 
 def _calculate_net_expenditure(
     total_travel_distance: float,
     total_trips: int,
     served_requests: int,
+    total_operating_time: float = 0.0,
+    accepted_deviations: int = 0,
 ) -> float:
-    return float(total_travel_distance * 2 + total_trips * 100 - served_requests * 3)
-
+    operating_cost = (
+        float(total_operating_time) / 60.0 * VEHICLE_OPERATING_COST_PER_HOUR
+    )
+    return float(
+        total_travel_distance / 1000 * 2
+        + operating_cost * 40
+        + total_trips * 15
+        + 0 * accepted_deviations
+        - served_requests * 3
+    )
 
 def _calculate_objective(
     total_wait: float,
@@ -24,14 +35,19 @@ def _calculate_objective(
     total_requests: int,
     served_requests: int,
 ) -> float:
+    timeobj = time_objective(total_wait, total_walk, total_onboard)
     refusal_requests = int(total_requests - served_requests)
     return float(
-        2 * total_wait
-        + 3 * total_walk
-        + total_onboard
+        timeobj
         + REFUSAL_PENALTY * refusal_requests
     )
 
+def time_objective(
+    total_wait: float,
+    total_walk: float,
+    total_onboard: float,
+) -> float:
+    return float(total_wait + 3* total_walk + 2* total_onboard)
 
 def minimize_objective(
     candidates: Iterable[dict[str, Any]],
@@ -63,17 +79,22 @@ def set_operator_metrics(
     acc: ModeAccumulator,
     total_travel_distance: float,
     total_trips: int,
+    total_operating_time: float,
+    accepted_deviations: int = 0,
 ) -> None:
     acc.total_travel_distance = float(total_travel_distance)
     acc.total_trips = int(total_trips)
+    acc.operating_time = float(total_operating_time)
     acc.net_expenditure = _calculate_net_expenditure(
         acc.total_travel_distance,
         acc.total_trips,
         acc.served_requests,
+        acc.operating_time,
+        accepted_deviations,
     )
 
 
-def finalize_nonbaseline_mode(
+def finalize_nonbaseline_mode( 
     mode_id: int,
     scenario: Scenario,
     requests: list[TripRequest],
@@ -95,6 +116,7 @@ def finalize_nonbaseline_mode(
         feasible=feasible,
         feasibility_reason=feasibility_reason,
         total_trips=acc.total_trips,
+        operating_time=acc.operating_time,
         max_concurrent_trips=acc.max_concurrent_trips,
         vehicle_reuse_ratio=acc.vehicle_reuse_ratio,
     )
@@ -138,6 +160,7 @@ def _finalize_result(
     feasible: bool,
     feasibility_reason: str,
     total_trips: int | None = None,
+    operating_time: float | None = None,
     max_concurrent_trips: int | None = None,
     vehicle_reuse_ratio: float | None = None,
 ) -> dict[str, Any]:
@@ -175,6 +198,7 @@ def _finalize_result(
         "total_trips": (
             None if total_trips is None else int(total_trips)
         ),
+        "operating_time": _round_metric(operating_time),
         "max_concurrent_trips": (
             None if max_concurrent_trips is None else int(max_concurrent_trips)
         ),

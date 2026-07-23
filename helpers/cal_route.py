@@ -3,49 +3,60 @@
 def routes(nets): #grid
     grid_size = nets.grid
     num_routes = nets.num_routes
-    x_margin: int = 1
-    y_margin: int = 2
-    half_height: int = 1 
+
+    spacing = 10
+    x_margin = 5
+    route_height = 10
 
     x_left = x_margin
-    x_mid = grid_size // 2
     x_right = grid_size - x_margin
-    y_lower = half_height
-    y_upper = grid_size - 1 - half_height
 
     if num_routes == 1:
-        y_centres = (grid_size // 2,)
+        y_above_left = (grid_size // 2 + route_height // 2,)
     else:
-        spacing = (y_upper - y_lower) / (num_routes - 1)
-        y_centres = tuple(
-            round(y_lower + i * spacing)
-            for i in range(num_routes)
-        )
+        y_above_left = (20,40)
 
     route_specs = tuple(
-        (
-            (x_left, y),
-            (x_left, y + half_height),
-            (x_mid, y + half_height),
-            (x_right, y + half_height),
-            (x_right, y),
-            (x_right, y - half_height),
-            (x_mid, y - half_height),
-            (x_left, y - half_height),
+        _rectangle_stops(
+            x_left=x_left,
+            x_right=x_right,
+            y_top=y,
+            y_bottom=y - route_height,
+            spacing=spacing,
         )
-        for y in y_centres
+        for y in y_above_left
     )
 
     invalid_nodes = [
         node
         for route in route_specs
         for node in route
-        if not (0 <= node[0] < grid_size and 0 <= node[1] < grid_size)
+        if not (
+            0 <= node[0] < grid_size
+            and 0 <= node[1] < grid_size
+        )
     ]
+
     if invalid_nodes:
         raise ValueError(
-            "route contains nodes outside the grid: "
+            "Route contains nodes outside the grid: "
             f"{invalid_nodes[:10]}"
         )
 
     return route_specs
+
+
+def _rectangle_stops(x_left, x_right, y_top, y_bottom, spacing):
+    xs = tuple(range(x_left, x_right + 1, spacing))
+
+    if xs[-1] != x_right:
+        raise ValueError("x_right must align with stop spacing")
+    if (y_top - y_bottom) % spacing != 0:
+        raise ValueError("route height must align with stop spacing")
+
+    top = tuple((x, y_top) for x in xs)
+    right = tuple((x_right, y) for y in range(y_top - spacing, y_bottom, -spacing))
+    bottom = tuple((x, y_bottom) for x in reversed(xs))
+    left = tuple((x_left, y) for y in range(y_bottom + spacing, y_top, spacing))
+
+    return top + right + bottom + left

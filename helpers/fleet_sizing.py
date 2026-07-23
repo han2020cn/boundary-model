@@ -26,8 +26,8 @@ def required_grid_route_vehicle_count(
     fleet: Any,
 ) -> int:
     _validate_grid_inputs(nets, fleet)
-    route_distance_km = float(route_edge_count) * _grid_edge_km(nets)
-    route_cycle_time_min = route_distance_km / float(fleet.speed)
+    route_distance_m = float(route_edge_count) * nets.grid_len
+    route_cycle_time_min = 10 + route_distance_m / float(fleet.speed)
     return max(1, int(math.ceil(route_cycle_time_min / float(fleet.freq))))
 
 

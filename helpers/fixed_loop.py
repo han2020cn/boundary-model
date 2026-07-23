@@ -11,6 +11,8 @@ from helpers.types import CandidateConstraint, GridNode
 
 
 DISTANCE_CACHE_KEY = "_boundary_model_shortest_path_lengths"
+PhysicalTripKey = tuple[str, int, int]
+LoopLoadKey = tuple[PhysicalTripKey, int]
 
 
 def distance_shortpath(
@@ -34,15 +36,19 @@ def distance_shortpath(
 
 def _build_loop_capacity_constraint(
     runtime_fleet: Any,
-    loads: defaultdict[tuple[int, int, float], int],
+    loads: defaultdict[LoopLoadKey, int],
     route_length: int,
 ) -> CandidateConstraint:
     def constraint(candidate: dict[str, Any]) -> str | None:
+        trip_key = (
+            str(candidate["loop_id"]),
+            int(candidate["vehicle_id"]),
+            int(candidate["departure_index"]),
+        )
         if _check_loop_capacity(
             runtime_fleet,
             loads,
-            int(candidate["vehicle_id"]),
-            float(candidate["route_start_time"]),
+            trip_key,
             int(candidate["boarding_anchor"]),
             int(candidate["alighting_anchor"]),
             route_length,
@@ -73,7 +79,7 @@ def _scheduled_pass_candidates(
     bus_v = fleet.speed
     headway = float(fleet.freq)
     span = float(config.span)
-    departure_count = int(math.ceil(span / headway)) + 1
+    departure_count = int(math.floor(span / headway)) + 1
 
     vehicle_ids = tuple(sorted(loop.vehicle_offsets))
     candidates: list[dict[str, Any]] = []
@@ -97,7 +103,7 @@ def _scheduled_pass_candidates(
     return candidates
 
 
-def _next_assigned_departure_time(
+def next_assigned_departure_time(
     config,
     fleet,
     loop: LoopContext,
@@ -143,9 +149,8 @@ def _calculate_travel_index(start_index: int, end_index: int, cycle_length: int)
 
 def _check_loop_capacity(
     fleet,
-    loads: defaultdict[tuple[int, int, float], int],
-    vehicle_id: int,
-    route_start_time: float,
+    loads: defaultdict[LoopLoadKey, int],
+    trip_key: PhysicalTripKey,
     boarding_index: int,
     alighting_index: int,
     route_length: int,
@@ -153,16 +158,14 @@ def _check_loop_capacity(
     travel_time = _calculate_travel_index(boarding_index, alighting_index, route_length)
     for step in range(travel_time):
         edge_index = (boarding_index + step) % route_length
-        edge_time = route_start_time + step
-        if loads[(vehicle_id, edge_index, edge_time)] >= fleet.cap:
+        if loads[(trip_key, edge_index)] >= fleet.cap:
             return False
     return True
 
 
 def _reserve_loop_capacity(
-    loads: defaultdict[tuple[int, int, float], int],
-    vehicle_id: int,
-    route_start_time: float,
+    loads: defaultdict[LoopLoadKey, int],
+    trip_key: PhysicalTripKey,
     boarding_index: int,
     alighting_index: int,
     route_length: int,
@@ -170,5 +173,4 @@ def _reserve_loop_capacity(
     travel_time = _calculate_travel_index(boarding_index, alighting_index, route_length)
     for step in range(travel_time):
         edge_index = (boarding_index + step) % route_length
-        edge_time = route_start_time + step
-        loads[(vehicle_id, edge_index, edge_time)] += 1
+        loads[(trip_key, edge_index)] += 1

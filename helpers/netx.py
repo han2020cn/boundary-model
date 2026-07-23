@@ -24,9 +24,17 @@ class NetworkContext:
     request_nodes: tuple[NetworkNode, ...]
 
 
-def build_grid_graph(grid_size: int) -> nx.Graph:
-    graph = nx.grid_2d_graph(grid_size, grid_size)
-    nx.set_edge_attributes(graph, 1, "weight")
+def build_grid_graph(net) -> nx.Graph:
+    graph = nx.grid_2d_graph(net.grid, net.grid)
+    nx.set_edge_attributes(graph, net.grid_len, "weight")
+    nx.set_node_attributes(
+        graph,
+        {
+            node: (float(node[0]), float(node[1]))
+            for node in graph.nodes
+        },
+        "pos",
+    )
     return graph
 
 """Build an abstract radial-ring network with weighted spoke and ring edges."""
@@ -93,8 +101,8 @@ def build_radial_ring_graph(
 def build_network_context(nets) -> NetworkContext:
     network_type = getattr(nets, "_type")
     if network_type == "grid":
-        graph = build_grid_graph(int(nets.grid))
-        route_specs = cr.routes(nets)   
+        graph = build_grid_graph(nets)
+        route_specs = cr.routes(nets)
         if route_specs is None:
             route_specs = getattr(nets, "routes", None)
         if route_specs is None:
@@ -254,7 +262,7 @@ def print_grid_and_radial_ring_graphs(net, choice
         print_graph_contents(radial_ring_graph, "radial-ring graph")
         print()
     else:
-        grid_graph = build_grid_graph(net.grid)
+        grid_graph = build_grid_graph(net)
         radial_ring_graph = build_radial_ring_graph(net.spoke_count, net.ring_radial)
         print_graph_contents(grid_graph, "grid graph")
         print()

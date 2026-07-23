@@ -1,12 +1,11 @@
 import math
 
-
 import networkx as nx
 import helpers.fleet_sizing as fleet_sizing
 import helpers.functions as fs
 from helpers.config import LoopContext
 from helpers.types import GridNode
-# from helpers.netx import NetworkContext
+from pathlib import Path
 
 #grid network loops
 #TODO
@@ -26,10 +25,11 @@ def build_context(network_context, config, nets, fleet):
     weighted_contexts = {loop.id: _loop_context(loop, graph) for loop in loops} 
     headway = float(fleet.freq)
     span = float(config.span)
-    departure_count = int(math.ceil(span / headway)) + 1
+    departure_count = int(math.floor(span / headway)) + 1
 
     total_trips = 0
     total_travel_distance = 0.0
+    operating_time = 0.0
     infeasible_routes: list[str] = []
 
     for loop in loops:
@@ -44,6 +44,9 @@ def build_context(network_context, config, nets, fleet):
             infeasible_routes.append(loop.id)
         total_trips += departure_count
         total_travel_distance += float(departure_count) * route_length
+        operating_time += (
+            float(departure_count) * route_length / float(fleet.speed)
+        )
     metrics = {
         "feasible": not infeasible_routes, # not [] == true
         "feasibility_reason": (
@@ -54,6 +57,7 @@ def build_context(network_context, config, nets, fleet):
         "infeasible_routes": tuple(infeasible_routes),
         "total_trips": float(total_trips),
         "total_travel_distance": float(total_travel_distance),
+        "operating_time": float(operating_time),
     }
     return loops, weighted_contexts, metrics
 # loops: 包含路线节点、固定站点索引、车辆分配 
@@ -94,8 +98,9 @@ def _build_loop_sub(nets, route, route_vehicle_ids: tuple[int, ...], graph: nx.G
         anchor_index = route_positions[node]
         if getattr(nets, "_type", None) == "grid" and _is_grid_node(node):
             x_coord, y_coord = node
-            max_dev = max(0, int(float(getattr(nets, "max_dev", 0))))
-            for delta in range(1, max_dev + 1):
+            max_dev = max(0, float(getattr(nets, "max_dev")))
+            max_dev_grid = int(math.ceil(max_dev / float(nets.grid_len)))
+            for delta in range(1, max_dev_grid + 1):
                 for candidate in ((x_coord, y_coord + delta), (x_coord, y_coord - delta)):
                     if candidate in route_set or candidate not in graph:
                         continue

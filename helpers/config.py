@@ -7,6 +7,9 @@ from pathlib import Path
 from helpers.types import GridNode, NetworkNode
 
 
+Hotspot = tuple[float, float]
+HotspotConfig = Hotspot | tuple[Hotspot, ...]
+
 
 #######     main.py     ########
 @dataclass(frozen=True, slots=True)         #Class named in pascal case
@@ -17,20 +20,22 @@ class Config:
     ht: tuple[float]  # temporal
     replication: bool  #是否复现
     sc: int # 场景选择：1-需求场景，2-成本场景
+    seed_count: int # 生成不同的随机需求，用来做重复实验、降低随机性的影响
     pre_alpha: float = 0.5 # prebooking rate
-    span: int = 180 # 时间范围 （time horizon / simulation horizon） /minutes       from7:00 to 19:00
-    peaks: tuple[int, ...] = (6, 12)
-    peak_width_minutes: int = 3 # Gaussian peak width（高斯峰宽）
-    o_hotspot: tuple[int, int] = (2, 2) 
-    d_hotspot: tuple[int, int] = (7, 7)    
+    span: int = 300 # 时间范围 （time horizon / simulation horizon） /minutes       
+    peaks: tuple[int, ...] = (60,)
+    peak_width_minutes: int = 30 # Gaussian peak width（高斯峰宽）
+    o_hotspot: HotspotConfig = ((10, 10), (10, 30))
+    d_hotspot: HotspotConfig = ((40, 10), (40, 30))
     ##### 导出设定
     output_dir = Path(__file__).resolve().parents[1]/ "rs" #路径
-    date = datetime.now().strftime("%y%m%d_%H%M") #日期字符串 
+    date = f"{datetime.now().strftime('%y%m%d_%H%M')}" #日期字符串 
     ##### 重复设定        
-    base_seed: int = 20260601
-    seed_count: int = 2 # 生成不同的随机需求，用来做重复实验、降低随机性的影响
+    base_seed: int = 20260701
     ##### pedestrian parameter
-    walk_speed: float = 70  # m/minute
+    walk_speed: float = 33  # m/minute 2km/h
+    ##### 复现的demand路径
+    rep = Path("rs/requests/requests_0707_140602.json")
     @property
     def scene(self):
         if self.sc == 1:
@@ -56,7 +61,7 @@ class Grid:
     @property
     def hub(self):
         return (0, self.grid // 2)
-    max_dev: float = 5        # mode2 deviation 多少个grid edge
+    max_dev: float = 500        # mode2 deviation 多少m
 
     
 
@@ -118,8 +123,8 @@ class Radial:
 class Fleet:
     cap: int
     num: int = 0
-    freq: int = 40 # 车辆发车频率（分钟/车）
-    speed: float = 500 # 车辆速度（m/minute）30km/h
+    freq: int = 30 # 车辆发车频率（分钟/车）
+    speed: float = 420 # 车辆速度（m/minute）25km/h
     multi_sizes: tuple[int, ...] = (3, 6, 9, 12, 15)
     multi_cap: tuple[int, ...] = (15, 30, 45)
 # scenarios_num= len(LAMBDA_LEVELS) * len(HS_LEVELS) * len(HT_LEVELS)
@@ -173,8 +178,10 @@ class ModeAccumulator:
     total_walk: float = 0.0
     total_onboard: float = 0.0
     total_travel_distance: float = 0.0
+    operating_time: float = 0.0
     total_trips: int = 0
     net_expenditure: float = 0.0
+    accepted_deviations: int = 0
     total_trips: int | None = None
     max_concurrent_trips: int | None = None
     vehicle_reuse_ratio: float | None = None
@@ -187,5 +194,3 @@ class TripRequest:
     destination: NetworkNode
     departure_time: int
     request_type: int # "pre_booking" = 1
-
-
