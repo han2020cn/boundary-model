@@ -22,7 +22,7 @@ def _calculate_net_expenditure(
     )
     return float(
         total_travel_distance / 1000 * 2
-        + operating_cost * 40
+        + operating_cost
         + total_trips * 15
         + 0 * accepted_deviations
         - served_requests * 3
@@ -117,6 +117,7 @@ def finalize_nonbaseline_mode(
         feasibility_reason=feasibility_reason,
         total_trips=acc.total_trips,
         operating_time=acc.operating_time,
+        accepted_deviations=acc.accepted_deviations,
         max_concurrent_trips=acc.max_concurrent_trips,
         vehicle_reuse_ratio=acc.vehicle_reuse_ratio,
     )
@@ -161,6 +162,7 @@ def _finalize_result(
     feasibility_reason: str,
     total_trips: int | None = None,
     operating_time: float | None = None,
+    accepted_deviations: int | None = None,
     max_concurrent_trips: int | None = None,
     vehicle_reuse_ratio: float | None = None,
 ) -> dict[str, Any]:
@@ -199,6 +201,9 @@ def _finalize_result(
             None if total_trips is None else int(total_trips)
         ),
         "operating_time": _round_metric(operating_time),
+        "accepted_deviations": (
+            None if accepted_deviations is None else int(accepted_deviations)
+        ),
         "max_concurrent_trips": (
             None if max_concurrent_trips is None else int(max_concurrent_trips)
         ),

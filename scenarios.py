@@ -2,7 +2,7 @@ from datetime import datetime
 from dataclasses import replace
 from pathlib import Path
 import random
-from networkx import config
+# from networkx import config
 import pandas as pd
 from itertools import product
 from helpers.config import requests
@@ -42,6 +42,7 @@ RESULT_COLUMNS = [
     "total_service_time",
     "fleet_max",
     "operating_time", #所有物理dispatch的总运行时间（veh-min）
+    "accepted_deviations",
     # "capacity",
     "total_trips",  #DRT 实际出车次数
     "max_concurrent_trips", #DRT 最大同时运行车辆数
@@ -105,7 +106,7 @@ def _save_request_artifacts(
     nets,
     scenario: dict,
     *,
-    artifact_policy: str,
+    artifact_policy: str = "none",
     request_dir: Path,
     artifact_tag: str,
 ) -> None:
@@ -138,7 +139,7 @@ def _evaluate_before(
     scenario: dict,
     network_context,
     *,
-    artifact_policy: str = "all",
+    artifact_policy,
     request_dir: Path | None = None,
     artifact_tag: str | None = None,
 ):
@@ -238,7 +239,7 @@ def demand_scenario(
     shard_count: int = 1,
     run_id: str | None = None,
     output_root: Path | None = None,
-    artifact_policy: str = "all",
+    artifact_policy,
     resume: bool = False,
 ) -> pd.DataFrame:
     hpc.validate_shard(shard_id, shard_count)
@@ -268,10 +269,10 @@ def demand_scenario(
     else:
         run_id = hpc.validate_run_id(run_id)
         if output_root is None:
-            output_root = config.output_dir / "hpc"
+            output_root = config.output_dir 
         run_dir = Path(output_root) / run_id
-        shard_dir = run_dir / "shards" / f"shard_{shard_id:02d}"
-        init_path = shard_dir / "init.json"
+        shard_dir = run_dir / f"shard_{shard_id:02d}"
+        init_path = shard_dir / f"init_{shard_id:02d}.json"
         manifest_path = shard_dir / "manifest.json"
         request_dir = shard_dir / "requests"
         expected_manifest = hpc.new_manifest(
@@ -424,6 +425,7 @@ def mean_result(init_results: pd.DataFrame):
     "total_service_time",
     "fleet_max",
     "operating_time",
+    "accepted_deviations",
     "total_trips",
     "max_concurrent_trips",
     "vehicle_reuse_ratio",

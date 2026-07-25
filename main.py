@@ -13,9 +13,9 @@ from helpers.config import Config, Grid, Radial, Fleet
 
 # 场景选择：1-需求场景，2-成本场景 lambdas = tuple(range(10, 60, 20))
 config = Config(
-    lambdas=tuple(range(40,100, 10)),
-    hs=(0.8,0.5,0.2),
-    ht=(0.8,0.5,0.2),
+    lambdas=tuple(range(10,20,10)),
+    hs=(0.5,),
+    ht=(0.5,),
     replication=False,
     sc=1,
     seed_count=1,
@@ -33,7 +33,7 @@ def main(
     shard_count: int = 1,
     run_id: str | None = None,
     output_root: Path | None = None,
-    artifact_policy: str = "all",
+    artifact_policy,
     resume: bool = False,
 ) -> pd.DataFrame:
     if config.scene == "de":

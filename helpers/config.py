@@ -31,7 +31,7 @@ class Config:
     output_dir = Path(__file__).resolve().parents[1]/ "rs" #路径
     date = f"{datetime.now().strftime('%y%m%d_%H%M')}" #日期字符串 
     ##### 重复设定        
-    base_seed: int = 20260701
+    base_seed: int = 20260710
     ##### pedestrian parameter
     walk_speed: float = 33  # m/minute 2km/h
     ##### 复现的demand路径

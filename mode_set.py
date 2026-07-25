@@ -202,7 +202,7 @@ def evaluate_2(
     benchmark_expenditure: float | None,
     service_policy: str = "strict",
 ) -> dict[str, Any]:
-    return deviation.evaluate_2(
+    return deviation.deviation_2(
         config,
         nets,
         fleet,

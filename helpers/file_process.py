@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 import scenarios as sc
 
-def merge_file(input_files, dir_path, merged_filename, optimal_filename):
+def merge_file(input_files, dir_path, suffix, init_filename,merged_filename, optimal_filename):
 
     merged = []
 
@@ -22,7 +22,7 @@ def merge_file(input_files, dir_path, merged_filename, optimal_filename):
         feasible_results = [
             row
             for row in data
-            if row["net_expenditure"] <= row["benchmark_expenditure"]
+            if row["feasible"] == True
         ]
         merged.extend(feasible_results)
 
@@ -31,22 +31,22 @@ def merge_file(input_files, dir_path, merged_filename, optimal_filename):
         f"共 {len(merged)} 条记录"
     )
 
-    output_path_init = dir_path / "summaryofinit.json"
+    output_path_init = dir_path / f"{init_filename}_{suffix}.json"
     with output_path_init.open("w", encoding="utf-8") as f:
         json.dump(merged, f, ensure_ascii=False, indent=2)
 
     #calculate mean of each scenario_id
     merged_df = pd.DataFrame(merged)
     merged_df = sc.mean_result(merged_df) # feasible results only then mean
-    output_path_mean = dir_path / merged_filename
-    
+    output_path_mean = dir_path / f"{merged_filename}_{suffix}.json"
+
     #选出每个 scenario 的 optimal
     with output_path_mean.open("w", encoding="utf-8") as f:
         json.dump(merged_df.to_dict(orient="records"), f, ensure_ascii=False, indent=2)
     min_objective = merged_df.groupby("scenario_id")["objective_value"].transform("min")
     optimal_df = merged_df[merged_df["objective_value"] == min_objective].copy()
 
-    optimal_path = dir_path / optimal_filename
+    optimal_path = dir_path / f"{optimal_filename}_{suffix}.json"
 
     with optimal_path.open("w", encoding="utf-8") as f:
         json.dump(optimal_df.to_dict(orient="records"), f, ensure_ascii=False, indent=2)

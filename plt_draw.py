@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import matplotlib.tri as mtri
 from matplotlib.lines import Line2D
 
 import numpy as np
@@ -13,9 +14,6 @@ import pandas as pd
 
 import statsmodels.api as sm
 from statsmodels.nonparametric.smoothers_lowess import lowess
-import helpers.demand_generation as dg
-import helpers.netx as net
-import helpers.functions as fs
 
 
 # ===== 2. 为不同 mode_id 定义颜色 =====
@@ -37,133 +35,7 @@ COST_TRADEOFF_LINESTYLES = {
 
 COST_TRADEOFF_MARKERS = ("*", "X", "^", "D", "o", "s", "P")
 
-
-
 _DEFAULT_REGRESSION_TIMESTAMP: str | None = None
-
-# Draw 请求起终点 on the network
-def _draw_request(
-    input_file: str|list[TripRequest],
-    nets,
-    output_dir: Path | None = None,
-    date: str | None = None,
-) -> Path:
-    png_name = f"distribution_{date}.png" #png文件名
-    if isinstance(input_file, list):
-        requests = input_file
-    else:
-        requests = dg.load_requests(Path(output_dir/input_file))
-    context = net.build_network_context(nets)
-    graph = context.graph
-    network_type = context.network_type
-    _validate_nodes(requests, graph)
-
-    if network_type == "grid":
-        pos = _grid_node_positions(graph, nets)
-    elif network_type == "hub_spoke":
-        pos = _hub_spoke_node_positions(graph)
-    else:
-        raise ValueError("network_type must be 'grid' or 'hub_spoke'")
-
-    output_path = Path(output_dir) / png_name
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    fig, axes = plt.subplots(1, 2, figsize=(16, 7), sharex=False, sharey=False)
-    # _draw_network_base(axes[0], graph, pos, context.hub, labels=None)
-    _draw_request_points(axes, requests, pos)
-    axes[0].set_title("origins")
-    axes[1].set_title("destinations")
-    for ax in axes:
-        ax.set_xlim(-10 , nets.grid )
-        ax.set_ylim(-10 , nets.grid )
-        ax.set_xlabel("x")
-        ax.set_ylabel("y")
-        ax.set_title(f"Request Origins and Destinations ({network_type})")
-        ax.set_aspect("auto", adjustable="box")
-        ax.legend(loc="best", framealpha=0.88)
-
-    plt.tight_layout()
-    fig.savefig(output_path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    return output_path
-
-
-def _validate_nodes(requests, graph) -> None:
-    missing = []
-    for request in requests:
-        if request.origin not in graph:
-            missing.append((request.request_id, "origin", request.origin))
-        if request.destination not in graph:
-            missing.append((request.request_id, "destination", request.destination))
-
-    if missing:
-        details = ", ".join(
-            f"request {request_id} {field}={node!r}"
-            for request_id, field, node in missing[:10]
-        )
-        if len(missing) > 10:
-            details += f", ... {len(missing) - 10} more"
-        raise ValueError(f"requests contain nodes outside graph: {details}")
-
-
-def _grid_node_positions(graph, nets) -> dict: # 根据网格网络的节点坐标计算位置
-    grid_len = float(getattr(nets, "grid_len", 1.0))
-    positions = {}
-    for node in graph.nodes:
-        if (
-            not isinstance(node, tuple)
-            or len(node) != 2
-            or not all(isinstance(value, (int, float)) for value in node)
-        ):
-            raise ValueError(f"grid node must be a numeric (x, y) tuple: {node!r}")
-        positions[node] = (float(node[0]), float(node[1]) )
-    return positions
-
-
-def _hub_spoke_node_positions(graph) -> dict:
-    positions = {}
-    missing_nodes = []
-    invalid_nodes = []
-
-    for node, data in graph.nodes(data=True):
-        if "pos" not in data:
-            missing_nodes.append(node)
-            continue
-        raw_pos = data["pos"]
-        if (
-            not isinstance(raw_pos, tuple)
-            or len(raw_pos) != 2
-            or not all(isinstance(value, (int, float)) for value in raw_pos)
-        ):
-            invalid_nodes.append(node)
-            continue
-        positions[node] = (float(raw_pos[0]), float(raw_pos[1]))
-
-    if missing_nodes:
-        raise ValueError(f"hub_spoke graph nodes missing 'pos': {missing_nodes[:10]}")
-    if invalid_nodes:
-        raise ValueError(f"hub_spoke graph nodes have invalid 'pos': {invalid_nodes[:10]}")
-    return positions
-
-
-def _draw_request_points(axes, requests, pos: dict) -> None:
-    #  2D histogram heatmap 也可以考虑用热力图
-    origin_x = np.asarray([pos[request.origin][0] for request in requests])
-    origin_y = np.asarray([pos[request.origin][1] for request in requests])
-    destination_x = np.asarray([pos[request.destination][0] for request in requests])
-    destination_y = np.asarray([pos[request.destination][1] for request in requests])
-    
-    add_scatter(axes[0], records = None,
-                x_key = origin_x,
-                y_key = origin_y,
-                )
-    
-    add_scatter(axes[1], records = None,
-                x_key = destination_x,
-                y_key = destination_y,
-                )
-    
-
 
 
 #3d scatter plot
@@ -191,8 +63,86 @@ def plts_3d(frame: pd.DataFrame,
     plt.close(fig)
     return outpng
 
-# 2d scatter plot
-def plts_2d(
+
+def plt_surface(
+    frame: pd.DataFrame,
+    output_path: Path,
+    axes: tuple[str, str],
+    z: str,
+) -> Path:
+    
+    if len(axes) != 2:
+        raise ValueError("axes must contain exactly two column names: (x, y)")
+
+    x, y = axes
+    requested_columns = [x, y, z]
+    missing_columns = [key for key in requested_columns if key not in frame.columns]
+    if missing_columns:
+        raise KeyError(f"frame is missing columns: {missing_columns}")
+    if len(set(requested_columns)) != 3:
+        raise ValueError("x, y, and z must refer to three different columns")
+
+    surface_data = frame[requested_columns].apply(pd.to_numeric, errors="coerce")
+    surface_data = surface_data.dropna().groupby([x, y], as_index=False)[z].max()
+    if len(surface_data) < 3:
+        raise ValueError("at least three distinct, valid x-y points are required")
+
+    x_values = surface_data[x].to_numpy(dtype=float, copy=True)
+    y_values = surface_data[y].to_numpy(dtype=float, copy=True)
+    z_values = surface_data[z].to_numpy(dtype=float, copy=True)
+
+    triangulation = mtri.Triangulation(x_values, y_values)
+    if triangulation.triangles.size == 0:
+        raise ValueError("x-y points must not all be collinear")
+
+    grid_x, grid_y = np.meshgrid(
+        np.linspace(x_values.min(), x_values.max(), 200),
+        np.linspace(y_values.min(), y_values.max(), 200),
+    )
+    interpolator = mtri.CubicTriInterpolator(triangulation, z_values, kind="geom")
+    grid_z = interpolator(grid_x, grid_y).filled(np.nan)
+
+    output_path = Path(output_path)
+    outpng = output_path
+
+    outpng.parent.mkdir(parents=True, exist_ok=True)
+
+    fig = plt.figure(figsize=(11, 8))
+    ax = fig.add_subplot(111, projection="3d")
+    surface = ax.plot_surface(
+        grid_x,
+        grid_y,
+        grid_z,
+        cmap="viridis",
+        linewidth=0,
+        antialiased=True,
+        rcount=200,
+        ccount=200,
+        alpha=0.92,
+    )
+    ax.scatter(
+        x_values,
+        y_values,
+        z_values,
+        color="black",
+        s=10,
+        alpha=0.55,
+        depthshade=False,
+        label="observations",
+    )
+    ax.set_xlabel(x)
+    ax.set_ylabel(y)
+    ax.set_zlabel(z)
+    ax.set_title(f"{z} surface over {x} and {y}")
+    ax.view_init(elev=28, azim=-135)
+    ax.legend(loc="upper right")
+    fig.colorbar(surface, ax=ax, shrink=0.68, pad=0.1, label=z)
+    fig.tight_layout()
+    fig.savefig(outpng, dpi=600, bbox_inches="tight")
+    plt.show()
+    return outpng
+
+def plt_scatter_2d(
     frame: pd.DataFrame,
     output_path: Path,
     date_stamp: str,
@@ -206,42 +156,43 @@ def plts_2d(
     confidence: float = 0.95,
     regression_timestamp: str | None = None,
 ) -> Path:
-    outpng = Path(output_path)/f"2d_plots_{date_stamp}.png"
+    """2d scatter plot: xy + regression"""
+    outpng = Path(output_path)/f"scatter_2d_{date_stamp}.png"
     outpng.parent.mkdir(parents=True, exist_ok=True)
 
     fig = plt.figure(figsize=(11, 8))
     ax = fig.add_subplot(111)
     _draw_2d_scatter(ax, frame, x_key, y_key, types, "x-y scatter plot", show_legend=True)
-    _draw_regression_overlays(
-        ax,
-        frame,
-        x_key,
-        y_key,
-        show_ols=show_ols,
-        show_ci=show_ci,
-        show_lowess=show_lowess,
-        confidence=confidence,
-    )
-    # 导出回归结果
-    if export_regression: 
-        report_frame = fs._regression_report(
-            frame,
-            output_path,
-            x_key,
-            y_key,
-            plot_name="2d",
-            panel="main",
-            confidence=confidence,
-        )
+    # _draw_regression_overlays(
+    #     ax,
+    #     frame,
+    #     x_key,
+    #     y_key,
+    #     show_ols=show_ols,
+    #     show_ci=show_ci,
+    #     show_lowess=show_lowess,
+    #     confidence=confidence,
+    # )
+    # # 导出回归结果
+    # if export_regression: 
+    #     report_frame = fs._regression_report(
+    #         frame,
+    #         output_path,
+    #         x_key,
+    #         y_key,
+    #         plot_name="2d",
+    #         panel="main",
+    #         confidence=confidence,
+    #     )
 
 
     plt.tight_layout(rect=(0.0, 0.0, 0.84, 1.0))
     plt.savefig(outpng, dpi=600, bbox_inches="tight")
     # plt.show()
-    plt.close(fig)
+    # plt.close(fig)
     return outpng
 
-
+# a pair of 2d scatter plots: 相同的x轴，不同的y轴，regression
 def plts_2d_pair(
     left_frame: pd.DataFrame,
     right_frame: pd.DataFrame,
@@ -252,8 +203,6 @@ def plts_2d_pair(
     y_key,
     y1_key,
     types: list[str],
-    left_title: str,
-    right_title: str,
     prebooking_alpha: float | None = None,
     show_ols: bool = True,
     show_ci: bool = True,
@@ -262,52 +211,53 @@ def plts_2d_pair(
     confidence: float = 0.95,
     regression_timestamp: str | None = None,
 ) -> Path:
-    outpng = Path(output_dir) / f"2d_pairs_{date_stamp}.png"
+    outpng = Path(output_dir) / f"2d_pair_{date_stamp}.png"
     outpng.parent.mkdir(parents=True, exist_ok=True)
-
+    left_title = y_key
+    right_title = y1_key
     fig, axes = plt.subplots(1, 2, figsize=(16, 7), sharex=False, sharey=False)
     _draw_2d_scatter(axes[0], left_frame, x_key, y_key, types, left_title, show_legend=False)
     _draw_2d_scatter(axes[1], right_frame, x1_key, y1_key, types, right_title, show_legend=False)
-    _draw_regression_overlays(
-        axes[0],
-        left_frame,
-        x_key,
-        y_key,
-        show_ols=show_ols,
-        show_ci=show_ci,
-        show_lowess=show_lowess,
-        confidence=confidence,
-    )
-    _draw_regression_overlays(
-        axes[1],
-        right_frame,
-        x1_key,
-        y1_key,
-        show_ols=show_ols,
-        show_ci=show_ci,
-        show_lowess=show_lowess,
-        confidence=confidence,
-    )
+    # _draw_regression_overlays(
+    #     axes[0],
+    #     left_frame,
+    #     x_key,
+    #     y_key,
+    #     show_ols=show_ols,
+    #     show_ci=show_ci,
+    #     show_lowess=show_lowess,
+    #     confidence=confidence,
+    # )
+    # _draw_regression_overlays(
+    #     axes[1],
+    #     right_frame,
+    #     x1_key,
+    #     y1_key,
+    #     show_ols=show_ols,
+    #     show_ci=show_ci,
+    #     show_lowess=show_lowess,
+    #     confidence=confidence,
+    # )
 
-    if export_regression:
-        left_report = fs._regression_report(
-            left_frame,
-            output_dir,
-            x_key,
-            y_key,
-            plot_name="2d_pairs",
-            panel="left",
-            confidence=confidence,
-        )
-        right_report = fs._regression_report(
-            right_frame,
-            output_dir,
-            x1_key,
-            y1_key,
-            plot_name="2d_pairs",
-            panel="right",
-            confidence=confidence,
-        )
+    # if export_regression:
+    #     left_report = fs._regression_report(
+    #         left_frame,
+    #         output_dir,
+    #         x_key,
+    #         y_key,
+    #         plot_name="2d_pairs",
+    #         panel="left",
+    #         confidence=confidence,
+    #     )
+    #     right_report = fs._regression_report(
+    #         right_frame,
+    #         output_dir,
+    #         x1_key,
+    #         y1_key,
+    #         plot_name="2d_pairs",
+    #         panel="right",
+    #         confidence=confidence,
+    #     )
 
     handles, labels = axes[0].get_legend_handles_labels()
     if prebooking_alpha is not None:
@@ -330,83 +280,88 @@ def plts_2d_pair(
     return outpng
 
 
-def plts_cost_tradeoff(
+def plts_tradeoff(
     x_key: str,
     y_key: str,
     frame: pd.DataFrame,
     output_dir: Path,
     date_stamp: str,
-    fleet_sizes: Sequence[int] | None = None,
-    config: Config | None = None,
-
+    colors: str,
+    markers: str | None = None,
+    linestyles: str | None = None,
 ) -> Path:
-    '''frame: pd.DataFrame
-    "lambda",
-    "mode_id",
-    "fleet_max",
-    "avg_net_expenditure",
-    "avg_service_time",
-    '''
-    outpng = Path(output_dir) / f"cost_tradeoff_{date_stamp}.png"
+
+    outpng = Path(output_dir) / f"tradeoff_{date_stamp}.png"
     outpng.parent.mkdir(parents=True, exist_ok=True)
 
-    lambda_values = _ordered_values(frame, "lambda", config.lambdas)
-    ht_values = _ordered_values(frame, "ht", config.ht)
-    hs_values = _ordered_values(frame, "hs", config.hs)
-    fleet_values = _ordered_values(frame, "fleet_max", fleet_sizes)
-    mode_values = _ordered_values(frame, "mode_id", config.modes)
-    fleet_markers = _fleet_marker_map(fleet_values)
-    color_specs = [
-    ("lambda", lambda_values, _value_color_map(lambda_values)),
-    ("ht", ht_values, _value_color_map(ht_values)),
-    ("hs", hs_values, _value_color_map(hs_values)),
-]
-    fig, axes = plt.subplots(1, 3, figsize=(12, 7),
-                           sharex=True, sharey=True)
-    fig.supxlabel("Unit expenditure (£/pax)")
-    fig.supylabel("Unit time (minutes/pax)")
-    fig.suptitle("Cost-time Tradeoff")
+    requested_columns = [x_key, y_key, colors]
+    requested_columns.extend(key for key in (markers, linestyles) if key is not None)
+    missing_columns = [key for key in requested_columns if key not in frame.columns]
+    if missing_columns:
+        raise KeyError(f"frame is missing columns: {missing_columns}")
 
-    for ax in axes:
-        ax.grid(True, alpha=0.3)
+    color_values = _ordered_values(frame, colors, None)
+    marker_values = _ordered_values(frame, markers, None) if markers is not None else []
+    linestyle_values = (
+        _ordered_values(frame, linestyles, None) if linestyles is not None else []
+    )
+    color_map = _value_color_map(color_values)
+    marker_map = _value_marker_map(marker_values)
+    linestyle_map = _value_linestyle_map(linestyle_values)
 
-    # #折线
-    # for mode_id, group in frame.groupby("mode_id"):
-    #     sorted_group = group.sort_values(by="lambda")
-    #     ax.plot(
-    #         sorted_group[x_key],
-    #         sorted_group[y_key],
-    #         color="black",
-    #         linestyle=COST_TRADEOFF_LINESTYLES.get(int(mode_id), "-"),
-    #         linewidth=1.8,
-    #         alpha=0.85,
-    #         label="_nolegend_",
-    #         zorder=2,
-    #     )
-    #散点
-    for ax, (color_key, values, colors) in zip(axes, color_specs):
-        for fleet_size, group in frame.groupby("fleet_max"):
-            point_colors = group[color_key].map(colors).tolist()
-            ax.scatter(
-                group[x_key],
-                group[y_key],
-                c=point_colors,
-                marker=fleet_markers[int(fleet_size)],
-                s=72,
-                edgecolors="black",
-                linewidths=0.35,
-                alpha=0.95,
+    fig, ax = plt.subplots(figsize=(10, 7))
+    ax.set_xlabel(x_key)
+    ax.set_ylabel(y_key)
+    ax.set_title("Cost-time Tradeoff")
+    ax.grid(True, alpha=0.3)
+
+    if linestyles is not None:
+        for style_value, group in frame.groupby(linestyles, sort=False):
+            sorted_group = group.sort_values(by=x_key)
+            ax.plot(
+                sorted_group[x_key],
+                sorted_group[y_key],
+                color="black",
+                linestyle=linestyle_map[style_value],
+                linewidth=1.8,
+                alpha=0.85,
                 label="_nolegend_",
-                zorder=3,
+                zorder=2,
             )
-        _add_value_legends(
-            ax,
-            values=values,
-            colors=colors,
-            title=color_key,
+
+    if markers is None:
+        scatter_groups = [(None, frame)]
+    else:
+        scatter_groups = frame.groupby(markers, sort=False)
+
+    for marker_value, group in scatter_groups:
+        ax.scatter(
+            group[x_key],
+            group[y_key],
+            c=group[colors].map(color_map).tolist(),
+            marker="o" if markers is None else marker_map[marker_value],
+            s=72,
+            edgecolors="black",
+            linewidths=0.35,
+            alpha=0.95,
+            label="_nolegend_",
+            zorder=3,
         )
 
-    plt.tight_layout()
+    _add_cost_tradeoff_legends(
+        ax,
+        color_key=colors,
+        color_values=color_values,
+        color_map=color_map,
+        marker_key=markers,
+        marker_values=marker_values,
+        marker_map=marker_map,
+        linestyle_key=linestyles,
+        linestyle_values=linestyle_values,
+        linestyle_map=linestyle_map,
+    )
+
+    plt.tight_layout(rect=(0.0, 0.0, 0.82, 1.0))
     plt.savefig(outpng, dpi=600, bbox_inches="tight")
     plt.close(fig)
     return outpng
@@ -439,11 +394,92 @@ def _value_color_map(values: Sequence) -> dict:
     }
 
 
-def _fleet_marker_map(fleet_values: Sequence[int]) -> dict[int, str]:
+
+
+def _value_marker_map(values: Sequence) -> dict:
     return {
-        int(fleet_size): COST_TRADEOFF_MARKERS[index % len(COST_TRADEOFF_MARKERS)]
-        for index, fleet_size in enumerate(fleet_values)
+        value: COST_TRADEOFF_MARKERS[index % len(COST_TRADEOFF_MARKERS)]
+        for index, value in enumerate(values)
     }
+
+
+def _value_linestyle_map(values: Sequence) -> dict:
+    styles = tuple(COST_TRADEOFF_LINESTYLES.values())
+    return {value: styles[index % len(styles)] for index, value in enumerate(values)}
+
+
+def _add_cost_tradeoff_legends(
+    ax,
+    *,
+    color_key: str,
+    color_values: Sequence,
+    color_map: dict,
+    marker_key: str | None,
+    marker_values: Sequence,
+    marker_map: dict,
+    linestyle_key: str | None,
+    linestyle_values: Sequence,
+    linestyle_map: dict,
+) -> None:
+    color_handles = [
+        Line2D(
+            [],
+            [],
+            color="none",
+            marker="o",
+            markerfacecolor=color_map[value],
+            markeredgecolor="black",
+            markersize=7,
+            label=f"{color_key} = {_format_number(value)}",
+        )
+        for value in color_values
+    ]
+    color_legend = ax.legend(
+        handles=color_handles,
+        title=color_key,
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0.0,
+    )
+    ax.add_artist(color_legend)
+
+    style_handles = []
+    if marker_key is not None:
+        style_handles.extend(
+            Line2D(
+                [],
+                [],
+                color="black",
+                linestyle="none",
+                marker=marker_map[value],
+                markerfacecolor="white",
+                markersize=7,
+                label=f"{marker_key} = {_format_number(value)}",
+            )
+            for value in marker_values
+        )
+    if linestyle_key is not None:
+        style_handles.extend(
+            Line2D(
+                [],
+                [],
+                color="black",
+                linestyle=linestyle_map[value],
+                linewidth=1.8,
+                label=f"{linestyle_key} = {_format_number(value)}",
+            )
+            for value in linestyle_values
+        )
+    if style_handles:
+        ax.legend(
+            handles=style_handles,
+            title=" / ".join(
+                key for key in (marker_key, linestyle_key) if key is not None
+            ),
+            loc="lower left",
+            bbox_to_anchor=(1.02, 0.0),
+            borderaxespad=0.0,
+        )
 
 
 def _add_value_legends(ax, values, colors, title) -> None:
@@ -788,95 +824,6 @@ def _regression_timestamp(timestamp: str | None) -> str:
     return _DEFAULT_REGRESSION_TIMESTAMP
 
 
-# 2x2 subplots
-def plts_4s(path_file: Path,
-            x_key, y_key, z_key,
-            offset: bool) -> Path:
-    # ===== 1. 读取 JSON 文件 =====
-    records, json_path = load_records(Path(path_file))
-    outpng = Path(json_path).with_name("4s_" + json_path.stem).with_suffix(".png")
-
-
-
-    # ===== 3. 创建 2x2 图 =====
-    fig = plt.figure(figsize=(14, 10))
-    ax_3d = fig.add_subplot(221, projection="3d")
-    ax_xy = fig.add_subplot(222)
-    ax_xz = fig.add_subplot(223)
-    ax_yz = fig.add_subplot(224)
-
-    ax_3d = model_3d(ax_3d, records, x_key, y_key, z_key, offset)
-    ax_xy = add_projections(ax_xy, records, 
-                 x_key, y_key, z_key,
-                 'xy',
-                 )
-    ax_xz = add_projections(ax_xz, records, 
-                 x_key, y_key, z_key,
-                 'xz',
-                 )
-    ax_yz = add_projections(ax_yz, records, 
-                 x_key, y_key, z_key,
-                 'yz',
-                 )    
-
-    # ===== 4. 坐标轴和标题 =====
-    x_min, x_max = -0.08, 1.05
-    y_min, y_max = -0.08, 1.05
-    z_min, z_max = 18, 62
-
-    #2x2定位
-    ax_3d.view_init(elev=24, azim=-58)
-
-    # XY
-    ax_xy.set_xlim(x_min, x_max)
-    ax_xy.set_ylim(y_min, y_max)
-    ax_xy.set_xticks([0.0, 0.5, 1.0])
-    ax_xy.set_yticks([0.0, 0.5, 1.0])
-    ax_xy.set_xlabel("temporal")
-    ax_xy.set_ylabel("spatial")
-    ax_xy.set_title("temporal-spatial Projection")
-    ax_xy.grid(True, alpha=0.3)
-
-    # XZ
-    ax_xz.set_xlim(x_min, x_max)
-    ax_xz.set_ylim(z_min, z_max)
-    ax_xz.set_xticks([0.0, 0.5, 1.0])
-    ax_xz.set_yticks([20, 40, 60])
-    ax_xz.set_xlabel("temporal")
-    ax_xz.set_ylabel("lambda")
-    ax_xz.set_title("temporal-lambda Projection")
-    ax_xz.grid(True, alpha=0.3)
-
-    # YZ
-    ax_yz.set_xlim(y_min, y_max)
-    ax_yz.set_ylim(z_min, z_max)
-    ax_yz.set_xticks([0.0, 0.5, 1.0])
-    ax_yz.set_yticks([20, 40, 60])
-    ax_yz.set_xlabel("spatial")
-    ax_yz.set_ylabel("lambda")
-    ax_yz.set_title("spatial-lambda Projection")
-    ax_yz.grid(True, alpha=0.3)
-
-    # ===== 5. 图例 =====
-    handles, labels = ax_3d.get_legend_handles_labels()
-    fig.legend(
-        handles,
-        labels,
-        title="mode_id",
-        loc="center left",
-        bbox_to_anchor=(0.86, 0.5),
-        ncol=1,
-        borderaxespad=0.0,
-    )
-
-    plt.tight_layout(rect=(0.0, 0.0, 0.82, 1.0))
-
-    plt.savefig(outpng, dpi=600, bbox_inches="tight")
-    # plt.show()
-    # plt.pause(0.1)  # 确保图像显示出来
-    #plt.close(fig)
-    return outpng
-
 # 3d scatter plot
 def model_3d(ax, records, x_key, y_key, z_key,
              offset_):
@@ -1041,12 +988,12 @@ def load_records(path_file: Path) -> tuple[list[dict], Path]:
 
     return records, results_path
 
-def demand_3d(frame: pd.DataFrame,  #x_key, y_key, z_key 分别是 config.ht, config.hs, config.lambdas,但是legend按照 mode_id 来显示颜色。
+def plt_scatter_3d(frame: pd.DataFrame,  #x_key, y_key, z_key 分别是 config.ht, config.hs, config.lambdas,但是legend按照 mode_id 来显示颜色。
             output_dir: Path,
             date_stamp: str,
             x_key: str, y_key: str, z_key: str,
             offset: bool) -> Path:
-    outpng = Path(output_dir) / f"demand_3d_{date_stamp}.png"
+    outpng = Path(output_dir) / f"scatter_3d_{date_stamp}.png"
 
     fig = plt.figure(figsize=(11, 8))
     ax = fig.add_subplot(111, projection="3d")
@@ -1065,24 +1012,25 @@ def demand_3d(frame: pd.DataFrame,  #x_key, y_key, z_key 分别是 config.ht, co
     return outpng
 
 
-def draw_section(
+def plts_section(
     frame: pd.DataFrame,
     x_key: str,
     y_key: str,
     z_key: str,
-    offset: bool = False,
+    offset: bool,
+    output_dir: Path,
     *,
+    max_sections: int = 12,
     section_axes: Sequence[str] | None = None,
     section_values: dict[str, Sequence[float]] | None = None,
-    max_sections: int = 9,
     max_cols: int = 3,
     section_strategy: str = "quantile",
-    tolerance: float = 1e-9,
 ) -> list[Path]:
+    tolerance = float(1e-9),
     required_columns = {x_key, y_key, z_key, "mode_id"}
     missing_columns = required_columns - set(frame.columns)
-    if isinstance(offset, (tuple, list)):
-        offset = bool(offset[0]) if len(offset) == 1 else bool(offset)
+    if missing_columns:
+        raise KeyError(f"frame is missing columns: {sorted(missing_columns)}")
 
     axis_keys = [x_key, y_key, z_key]
     axis_lookup = {
@@ -1095,7 +1043,7 @@ def draw_section(
     }
 
     if section_axes is None:
-        selected_axes = axis_keys
+        selected_axes = [z_key]
     else:
         selected_axes = []
         for axis in section_axes:
@@ -1104,19 +1052,6 @@ def draw_section(
                     f"Unknown section axis '{axis}'. Use one of {sorted(axis_lookup)}."
                 )
             selected_axes.append(axis_lookup[axis])
-
-    offsets = {
-        1: (-0.03, -0.03, -0.8),
-        2: (-0.03, 0.03, -0.3),
-        3: (0.03, -0.03, 0.3),
-        4: (0.03, 0.03, 0.8),
-    } if offset else {}
-
-    offset_by_axis = {
-        x_key: {mode_id: values[0] for mode_id, values in offsets.items()},
-        y_key: {mode_id: values[1] for mode_id, values in offsets.items()},
-        z_key: {mode_id: values[2] for mode_id, values in offsets.items()},
-    }
 
     def _select_section_values(section_key: str) -> list[float]:
         if section_values is not None and section_key in section_values:
@@ -1163,162 +1098,176 @@ def draw_section(
             return str(int(value))
         return f"{value:g}"
 
-    def _draw_section_scatter(
-        ax,
+    def _ordered_values(key: str) -> list[float]:
+        values = pd.to_numeric(frame[key], errors="coerce").dropna().unique()
+        return np.asarray(sorted(values), dtype=float).tolist()
+
+    def _cell_mode(
         section_frame: pd.DataFrame,
         plot_x: str,
         plot_y: str,
-    ) -> None:
-        if section_frame.empty:
-            ax.text(
-                0.5,
-                0.5,
-                "no data",
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
+        x_value: float,
+        y_value: float,
+    ) -> int | None:
+        numeric_x = pd.to_numeric(section_frame[plot_x], errors="coerce")
+        numeric_y = pd.to_numeric(section_frame[plot_y], errors="coerce")
+        mask = np.isclose(
+            numeric_x.to_numpy(dtype=float), x_value,
+            atol=tolerance, rtol=0.0, equal_nan=False,
+        ) & np.isclose(
+            numeric_y.to_numpy(dtype=float), y_value,
+            atol=tolerance, rtol=0.0, equal_nan=False,
+        )
+        modes = (
+            pd.to_numeric(section_frame.loc[mask, "mode_id"], errors="coerce")
+            .dropna()
+            .astype(int)
+            .unique()
+        )
+        if len(modes) > 1:
+            raise ValueError(
+                "draw_section requires one mode per scenario cell; "
+                f"found modes {sorted(modes.tolist())} at "
+                f"{plot_x}={x_value:g}, {plot_y}={y_value:g}."
             )
-            return
-
-        for mode_id, mode_frame in section_frame.groupby("mode_id"):
-            mode_id = int(mode_id)
-            x_values = pd.to_numeric(mode_frame[plot_x], errors="coerce").astype(float)
-            y_values = pd.to_numeric(mode_frame[plot_y], errors="coerce").astype(float)
-            if offset:
-                x_values = x_values + offset_by_axis[plot_x].get(mode_id, 0.0)
-                y_values = y_values + offset_by_axis[plot_y].get(mode_id, 0.0)
-            ax.scatter(
-                x_values,
-                y_values,
-                color=MODE_COLORS.get(mode_id, "black"),
-                edgecolors="black",
-                linewidths=0.4,
-                s=50,
-                alpha=0.85,
-            )
+        return int(modes[0]) if len(modes) == 1 else None
 
     outpngs: list[Path] = []
+    # Kept in the signature for compatibility with the former scatter layout.
+    _ = offset
+
+    modes = sorted(
+        pd.to_numeric(frame["mode_id"], errors="coerce")
+        .dropna()
+        .astype(int)
+        .unique()
+    )
+    handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="s",
+            color="white",
+            markerfacecolor=MODE_COLORS.get(mode_id, "black"),
+            markeredgecolor="black",
+            markersize=10,
+            linestyle="",
+            label=MODE_LABELS.get(mode_id, f"Mode {mode_id}"),
+        )
+        for mode_id in modes
+    ]
+
     for section_key in selected_axes:
         plot_x, plot_y = [key for key in axis_keys if key != section_key]
-        values = _select_section_values(section_key)
-        if not values:
+        section_values_for_axis = _select_section_values(section_key)
+        if not section_values_for_axis:
             continue
 
-        n_sections = len(values)
+        x_values = _ordered_values(plot_x)
+        y_values = _ordered_values(plot_y)
+        if not x_values or not y_values:
+            continue
+
+        n_sections = len(section_values_for_axis)
         n_cols = min(max_cols, n_sections)
         n_rows = int(np.ceil(n_sections / n_cols))
         fig, axes = plt.subplots(
             n_rows,
             n_cols,
-            figsize=(5.0 * n_cols, 4.0 * n_rows),
+            figsize=(3.4 * n_cols + 2.2, 3.0 * n_rows + 1.1),
             squeeze=False,
         )
         flat_axes = axes.ravel()
 
-        for ax, section_value in zip(flat_axes, values):
+        for panel_index, (ax, section_value) in enumerate(
+            zip(flat_axes, section_values_for_axis)
+        ):
             section_frame = _slice_frame(section_key, section_value)
-            _draw_section_scatter(ax, section_frame, plot_x, plot_y)
-            ax.set_xlabel(plot_x)
-            ax.set_ylabel(plot_y)
-            ax.set_title(f"{section_key} = {_format_section_value(section_value)}")
-            ax.grid(True, alpha=0.3)
+            for row_index, y_value in enumerate(y_values):
+                for col_index, x_value in enumerate(x_values):
+                    mode_id = _cell_mode(
+                        section_frame, plot_x, plot_y, x_value, y_value
+                    )
+                    if mode_id is not None:
+                        ax.add_patch(
+                            plt.Rectangle(
+                                (col_index - 0.5, row_index - 0.5),
+                                1.0,
+                                1.0,
+                                facecolor=MODE_COLORS.get(mode_id, "black"),
+                                edgecolor="none",
+                            )
+                        )
+                        # ax.text(
+                        #     col_index,
+                        #     row_index,
+                        #     f"M{mode_id}",
+                        #     color="white" if mode_id in {2, 4} else "black",
+                        #     fontsize=7,
+                        #     fontweight="bold",
+                        #     ha="center",
+                        #     va="center",
+                        # )
+
+            ax.set_xlim(-0.5, len(x_values) - 0.5)
+            ax.set_ylim(len(y_values) - 0.5, -0.5)
+            ax.set_xticks(range(len(x_values)))
+            ax.set_yticks(range(len(y_values)))
+            ax.set_xticklabels(
+                [_format_section_value(value) for value in x_values], fontsize=7
+            )
+            ax.set_yticklabels(
+                [_format_section_value(value) for value in y_values], fontsize=7
+            )
+            ax.set_xticks(np.arange(-0.5, len(x_values), 1.0), minor=True)
+            ax.set_yticks(np.arange(-0.5, len(y_values), 1.0), minor=True)
+            ax.grid(which="minor", color="0.75", linewidth=0.6)
+            ax.tick_params(which="minor", bottom=False, left=False)
+            ax.set_xlabel(plot_x, fontsize=8)
+            ax.set_ylabel(plot_y, fontsize=8)
+            ax.set_title(
+                f"{section_key} = {_format_section_value(section_value)}",
+                fontsize=10,
+                pad=6,
+            )
+            ax.set_aspect("equal")
+            for spine in ax.spines.values():
+                spine.set_color("0.25")
+                spine.set_linewidth(0.8)
 
         for ax in flat_axes[n_sections:]:
             ax.set_visible(False)
 
-        modes = sorted(
-            pd.to_numeric(frame["mode_id"], errors="coerce")
-            .dropna()
-            .astype(int)
-            .unique()
+        fig.suptitle(
+            f"Section by {section_key}: {plot_x}-{plot_y}",
+            fontsize=14,
+            y=1.2,
         )
-        handles = [
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="white",
-                markerfacecolor=MODE_COLORS.get(mode_id, "black"),
-                markeredgecolor="black",
-                markersize=8,
-                linestyle="",
-                label=MODE_LABELS.get(mode_id, f"Mode {mode_id}"),
-            )
-            for mode_id in modes
-        ]
         fig.legend(
             handles=handles,
             title="mode_id",
             loc="center left",
-            bbox_to_anchor=(0.90, 0.5),
+            bbox_to_anchor=(0.86, 0.5),
             borderaxespad=0.0,
+            frameon=True,
+            edgecolor="black",
         )
-        fig.suptitle(f"Section by {section_key}: {plot_x}-{plot_y}", y=0.995)
-        plt.tight_layout(rect=(0.0, 0.0, 0.86, 0.96))
+        fig.subplots_adjust(
+            left=0.07,
+            right=0.83,
+            bottom=0.07,
+            top=0.92,
+            wspace=0.30,
+            hspace=0.35,
+        )
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        outpng = output_path / f"section_by_{section_key}.png"
+        fig.savefig(outpng, dpi=600, bbox_inches="tight")
+        outpngs.append(outpng)
 
         plt.show()
+        plt.close(fig)
 
-    return 
-
-#导入class
-from main import config
-
-if __name__ == "__main__":    
-    results_dir = Path(__file__).resolve().parent /"rs" 
-    result_file = results_dir / "de_optimal_260630_1337.json" # 路径
-    parts = result_file.stem.split("_")
-    date_stamp = "_".join(parts[-2:])
-    results_frame = pd.read_json(result_file) 
-    types = ["mode_id"] 
-    # plot_columns = [
-    #     "mode_id",
-    #     "served_requests",
-    #     "net_expenditure",
-    #     "total_service_time",
-    # ]
-    
-    a = results_frame[["net_expenditure", "total_service_time"]].copy() # dividend
-    #计算请求的平均值
-    fr_plot1 = dg.avg_served(results_frame, a, "acceptance") 
-    
-    # fs.json_to_excel(output_dir/ "1_rs_260519_2037.json")
-    output_dir = Path(__file__).resolve().parent / "rs"/"rs_plot" #路径
-    plts_2d(fr_plot1,output_dir,date_stamp,"avg_net_expenditure","avg_service_time",types)
-    plts_2d_pair(   #画图 #plts_3d xyz图, plts_2d xy图, plts_4s 2x2图
-        fr_plot1,
-        fr_plot1,
-        output_dir,
-        date_stamp,
-        "served_requests",
-        "served_requests",
-        "avg_net_expenditure",
-        "avg_service_time",
-        types,
-        left_title="avg_net_expenditure",
-        right_title="avg_service_time",
-        prebooking_alpha=config.pre_alpha,
-    ) 
-    
-
-    fr_plot2 = dg.avg_served(results_frame, a, "acceptance") #计算请求的平均值
-    plts_cost_tradeoff("avg_net_expenditure","avg_service_time", fr_plot2, output_dir, date_stamp, config = config )
-    if "optimal" in str(result_file): # 如果是最优解的结果文件，则画 3D 图和需求图
-        offset = True
-        demand_3d(fr_plot2, output_dir, date_stamp, "ht", "hs", "lambda", offset)
-        draw_section(
-        fr_plot2,
-        "ht",
-        "hs",
-        "lambda",
-        offset,
-        )
-    else:
-        offset = True
-    
-    plts_3d(fr_plot2, output_dir, date_stamp, "avg_net_expenditure", "avg_service_time", "lambda", offset)  
-    
-
-
-    # print("Processing complete.")
-    # input("Press Enter to continue...")
-    # print("Continuing program...")
+    return outpngs

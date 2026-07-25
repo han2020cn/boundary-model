@@ -13,12 +13,15 @@ import helpers.fixed_loop as fixed_loop
 from helpers.config import TripRequest
 from helpers.types import GridNode, Scenario
 
+Mode2TripKey = tuple[str, int, int]
+Mode2EventKey = tuple[Mode2TripKey, str, int, tuple[Any, ...], int]
+
 
 def _travel_time(distance: float, fleet) -> float:
     return float(distance) / float(fleet.speed)
 
 
-def _trip_key(assignment: dict[str, Any]) -> tuple[str, int, int]:
+def _trip_key(assignment: dict[str, Any]) -> Mode2TripKey:
     return (
         str(assignment["loop_id"]),
         int(assignment["vehicle_id"]),
@@ -28,40 +31,65 @@ def _trip_key(assignment: dict[str, Any]) -> tuple[str, int, int]:
 
 @dataclass
 class Mode2DeviationEvent:
-    trip_key: tuple[str, int, int]
-    anchor_index: int
+    trip_key: Mode2TripKey
+    leg: str
+    anchor_occurrence: int
     anchor_node: GridNode
-    direction: int
+    lateral_branch: tuple[Any, ...]
+    lateral_direction: int
     depth: float
     request_ids: set[int] = field(default_factory=set)
 
     @property
-    def key(self) -> tuple[tuple[str, int, int], int, GridNode, int]:
-        return (self.trip_key, self.anchor_index, self.anchor_node, self.direction)
+    def key(self) -> Mode2EventKey:
+        return (
+            self.trip_key,
+            self.leg,
+            self.anchor_occurrence,
+            self.lateral_branch,
+            self.lateral_direction,
+        )
 
     @property
     def is_physical(self) -> bool:
-        return self.direction != 0 and self.depth > 0.0
+        return self.lateral_direction != 0 and self.depth > 0.0
+
+    @property
+    def anchor_index(self) -> int:
+        return self.anchor_occurrence
+
+    @property
+    def direction(self) -> int:
+        return self.lateral_direction
 
 
 def _mode2_event_key(
-    trip_key: tuple[str, int, int],
-    anchor_index: int,
-    anchor_node: GridNode,
-    direction: int,
-) -> tuple[tuple[str, int, int], int, GridNode, int]:
-    return (trip_key, int(anchor_index), anchor_node, int(direction))
+    trip_key: Mode2TripKey,
+    leg: str,
+    anchor_occurrence: int,
+    lateral_branch: tuple[Any, ...],
+    lateral_direction: int,
+) -> Mode2EventKey:
+    return (
+        trip_key,
+        str(leg),
+        int(anchor_occurrence),
+        tuple(lateral_branch),
+        int(lateral_direction),
+    )
 
 
 def _clone_mode2_events(
-    events: dict[tuple[tuple[str, int, int], int, GridNode, int], Mode2DeviationEvent],
-) -> dict[tuple[tuple[str, int, int], int, GridNode, int], Mode2DeviationEvent]:
+    events: dict[Mode2EventKey, Mode2DeviationEvent],
+) -> dict[Mode2EventKey, Mode2DeviationEvent]:
     return {
         key: Mode2DeviationEvent(
             trip_key=event.trip_key,
-            anchor_index=event.anchor_index,
+            leg=event.leg,
+            anchor_occurrence=event.anchor_occurrence,
             anchor_node=event.anchor_node,
-            direction=event.direction,
+            lateral_branch=event.lateral_branch,
+            lateral_direction=event.lateral_direction,
             depth=float(event.depth),
             request_ids=set(event.request_ids),
         )
@@ -76,13 +104,13 @@ def _copy_trip_assignments(
 
 
 def _mode2_physical_event_count(
-    events: dict[tuple[tuple[str, int, int], int, GridNode, int], Mode2DeviationEvent],
+    events: dict[Mode2EventKey, Mode2DeviationEvent],
 ) -> int:
     return sum(1 for event in events.values() if event.is_physical)
 
 
 def _mode2_detour_distance(
-    events: dict[tuple[tuple[str, int, int], int, GridNode, int], Mode2DeviationEvent],
+    events: dict[Mode2EventKey, Mode2DeviationEvent],
 ) -> float:
     return sum(2.0 * float(event.depth) for event in events.values() if event.is_physical)
 
@@ -111,7 +139,7 @@ def _capacity_feasible_from_assignments(
 def _grid_axis_deviation_option(nets,
     point: GridNode,
     anchor_node: GridNode,
-) -> dict[str, float | int] | None:
+) -> dict[str, Any] | None:
     if not (
         isinstance(point, tuple)
         and isinstance(anchor_node, tuple)
@@ -139,6 +167,7 @@ def _grid_axis_deviation_option(nets,
         "vehicle_deviation": vehicle_deviation,
         "residual_walk_d": residual_walk,
         "direction": direction,
+        "lateral_branch": ("grid_vertical", point_x),
     }
 
 
@@ -148,12 +177,13 @@ def _mode2_deviation_options(
     anchor_node: GridNode,
     baseline_walk_d: float,
     graph: nx.Graph,
-) -> list[dict[str, float | int]]:
+) -> list[dict[str, Any]]:
     options = [
         {
             "vehicle_deviation": 0.0,
             "residual_walk_d": float(baseline_walk_d),
             "direction": 0,
+            "lateral_branch": ("none",),
         }
     ]
 
@@ -162,10 +192,16 @@ def _mode2_deviation_options(
     else:
         distance_to_anchor = fixed_loop.distance_shortpath(point, anchor_node, graph)
         max_dev = float(getattr(nets, "max_dev", 0.0))
+        try:
+            path = nx.shortest_path(graph, anchor_node, point, weight="weight")
+            branch = ("path", path[1]) if len(path) > 1 else ("none",)
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            branch = ("endpoint", repr(point))
         deviation_option = {
             "vehicle_deviation": min(float(distance_to_anchor), max_dev),
             "residual_walk_d": max(0.0, float(distance_to_anchor) - max_dev),
             "direction": 1 if distance_to_anchor > 0.0 else 0,
+            "lateral_branch": branch,
         }
 
     if deviation_option is None:
@@ -214,27 +250,94 @@ def _mode2_anchor_for_service(
     raise ValueError(f"unknown Mode 2 service type: {service}")
 
 
+def _mode2_endpoint_for_service(assignment: dict[str, Any], service: str) -> GridNode:
+    request = assignment["request"]
+    if service == "origin":
+        return request.origin
+    if service == "destination":
+        return request.destination
+    raise ValueError(f"unknown Mode 2 service type: {service}")
+
+
+def _mode2_leg_for_service(service: str) -> str:
+    if service == "origin":
+        return "outbound"
+    if service == "destination":
+        return "inbound"
+    raise ValueError(f"unknown Mode 2 service type: {service}")
+
+
+def _mode2_lateral_branch(
+    anchor_node: GridNode,
+    endpoint_node: GridNode,
+    direction: int,
+) -> tuple[Any, ...]:
+    if direction == 0:
+        return ("none",)
+    if (
+        isinstance(anchor_node, tuple)
+        and isinstance(endpoint_node, tuple)
+        and len(anchor_node) == 2
+        and len(endpoint_node) == 2
+        and anchor_node[0] == endpoint_node[0]
+    ):
+        return ("grid_vertical", anchor_node[0])
+    return ("endpoint", repr(endpoint_node))
+
+
+def _mode2_event_sort_key(
+    events: dict[Mode2EventKey, Mode2DeviationEvent],
+    key: Mode2EventKey,
+) -> tuple[int, tuple[str, str], str, str, int]:
+    event = events[key]
+    return (
+        int(event.anchor_occurrence),
+        fixed_loop._node_sort_key(event.anchor_node),
+        str(event.leg),
+        repr(event.lateral_branch),
+        int(event.lateral_direction),
+    )
+
+
 def _apply_mode2_service_event(
     assignment: dict[str, Any],
-    events: dict[tuple[tuple[str, int, int], int, GridNode, int], Mode2DeviationEvent],
-    trip_key: tuple[str, int, int],
+    events: dict[Mode2EventKey, Mode2DeviationEvent],
+    trip_key: Mode2TripKey,
     service: str,
-    option: dict[str, float | int],
+    option: dict[str, Any],
 ) -> bool:
     depth = float(option["vehicle_deviation"])
-    direction = int(option["direction"])
+    direction = int(option.get("lateral_direction", option["direction"]))
     if depth <= 0.0 or direction == 0:
         return False
 
     anchor_index, anchor_node = _mode2_anchor_for_service(assignment, service)
-    key = _mode2_event_key(trip_key, anchor_index, anchor_node, direction)
+    lateral_branch = tuple(
+        option.get(
+            "lateral_branch",
+            _mode2_lateral_branch(
+                anchor_node,
+                _mode2_endpoint_for_service(assignment, service),
+                direction,
+            ),
+        )
+    )
+    key = _mode2_event_key(
+        trip_key,
+        _mode2_leg_for_service(service),
+        anchor_index,
+        lateral_branch,
+        direction,
+    )
     event = events.get(key)
     if event is None:
         event = Mode2DeviationEvent(
             trip_key=trip_key,
-            anchor_index=anchor_index,
+            leg=_mode2_leg_for_service(service),
+            anchor_occurrence=anchor_index,
             anchor_node=anchor_node,
-            direction=direction,
+            lateral_branch=lateral_branch,
+            lateral_direction=direction,
             depth=depth,
             request_ids=set(),
         )
@@ -251,7 +354,7 @@ def _apply_mode2_service_event(
 
 def _simulate_trip_with_events(
     trip_assignments: list[dict[str, Any]],
-    trip_events: dict[tuple[tuple[str, int, int], int, GridNode, int], Mode2DeviationEvent],
+    trip_events: dict[Mode2EventKey, Mode2DeviationEvent],
     config,
     fleet,
 ) -> dict[str, Any]:
@@ -327,7 +430,7 @@ def _simulate_trip_with_events(
         anchor_departure_time = anchor_arrival_time
 
         deviated_services: defaultdict[
-            tuple[tuple[str, int, int], int, GridNode, int],
+            Mode2EventKey,
             list[tuple[int, str]],
         ] = defaultdict(list)
         for _, _, assignment_index, service in same_position:
@@ -355,7 +458,7 @@ def _simulate_trip_with_events(
 
         for event_key in sorted(
             deviated_services,
-            key=lambda key: (key[1], fixed_loop._node_sort_key(key[2]), key[3]),
+            key=lambda key: _mode2_event_sort_key(trip_events, key),
         ):
             event = trip_events[event_key]
             event_start_time = (
@@ -471,7 +574,158 @@ def _simulate_trip_with_events(
     }
 
 
-def evaluate_2(
+def _build_mode2_assignments(
+    config,
+    fleet,
+    network_context,
+    requests: list[TripRequest],
+    loops,
+    weighted_contexts: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    walk_v = float(config.walk_speed)
+    loads: defaultdict[fixed_loop.LoopLoadKey, int] = defaultdict(int)
+    assignments: list[dict[str, Any]] = []
+
+    for request in sorted(requests, key=lambda item: (item.departure_time, item.request_id)):
+        loop = fixed_loop._nearest_loop_for_request(
+            request,
+            tuple(loops),
+            network_context.graph,
+        )
+        loop_context_choice = weighted_contexts[loop.id]
+        stop_offsets_d = loop_context_choice["offsets"]
+        route_length = float(loop_context_choice["length"])
+
+        origin_walk_d, boarding_stop, boarding_index = min(
+            (
+                (
+                    fixed_loop.distance_shortpath(
+                        request.origin,
+                        stop,
+                        network_context.graph,
+                    ),
+                    stop,
+                    index,
+                )
+                for stop, index in loop.fixed_stop_indices.items()
+            ),
+            key=lambda item: (item[0], fixed_loop._node_sort_key(item[1])),
+        )
+        destination_walk_d, alighting_stop, alighting_index = min(
+            (
+                (
+                    fixed_loop.distance_shortpath(
+                        request.destination,
+                        stop,
+                        network_context.graph,
+                    ),
+                    stop,
+                    index,
+                )
+                for stop, index in loop.fixed_stop_indices.items()
+            ),
+            key=lambda item: (item[0], fixed_loop._node_sort_key(item[1])),
+        )
+
+        boarding_offset_d = float(stop_offsets_d[boarding_stop])
+        alighting_offset_d = float(stop_offsets_d[alighting_stop])
+        base_route_d = fixed_loop._calculate_travel_weighted(
+            boarding_offset_d,
+            alighting_offset_d,
+            route_length,
+        )
+        earliest_boarding_time = (
+            float(request.departure_time)
+            + float(origin_walk_d) / walk_v
+        )
+        scheduled_passes = fixed_loop._scheduled_pass_candidates(
+            config,
+            fleet,
+            loop,
+            boarding_offset_d,
+            earliest_boarding_time,
+        )
+
+        best_choice = None
+        for scheduled_pass in scheduled_passes:
+            vehicle_id = int(scheduled_pass["vehicle_id"])
+            departure_index = int(scheduled_pass["departure_index"])
+            trip_key: fixed_loop.PhysicalTripKey = (
+                str(loop.id),
+                vehicle_id,
+                departure_index,
+            )
+            if not fixed_loop._check_loop_capacity(
+                fleet,
+                loads,
+                trip_key,
+                int(boarding_index),
+                int(alighting_index),
+                int(loop.length),
+            ):
+                continue
+
+            boarding_time = float(scheduled_pass["pass_time"])
+            wait_time = float(boarding_time - earliest_boarding_time)
+            onboard_time = float(base_route_d) / float(fleet.speed)
+            walk_time = float(origin_walk_d + destination_walk_d) / walk_v
+            best_choice = {
+                "request": request,
+                "loop": loop,
+                "loop_id": loop.id,
+                "vehicle_id": vehicle_id,
+                "departure_index": departure_index,
+                "route_departure_time": float(
+                    scheduled_pass["route_departure_time"]
+                ),
+                "boarding_node": boarding_stop,
+                "alighting_node": alighting_stop,
+                "boarding_anchor": int(boarding_index),
+                "alighting_anchor": int(alighting_index),
+                "boarding_offset": boarding_offset_d,
+                "alighting_offset": alighting_offset_d,
+                "route_length": route_length,
+                "base_route_d": float(base_route_d),
+                "boarding_time": boarding_time,
+                "dropoff_time": boarding_time + onboard_time,
+                "wait_time": wait_time,
+                "walk_time": walk_time,
+                "onboard_time": onboard_time,
+                "origin_walk_d": float(origin_walk_d),
+                "destination_walk_d": float(destination_walk_d),
+                "origin_walk_time": float(origin_walk_d) / walk_v,
+                "destination_walk_time": float(destination_walk_d) / walk_v,
+                "next_assigned_departure_time": (
+                    fixed_loop.next_assigned_departure_time(
+                        config,
+                        fleet,
+                        loop,
+                        departure_index,
+                    )
+                ),
+            }
+            break
+
+        if best_choice is None:
+            continue
+
+        fixed_loop._reserve_loop_capacity(
+            loads,
+            (
+                str(best_choice["loop_id"]),
+                int(best_choice["vehicle_id"]),
+                int(best_choice["departure_index"]),
+            ),
+            int(best_choice["boarding_anchor"]),
+            int(best_choice["alighting_anchor"]),
+            int(loop.length),
+        )
+        assignments.append(best_choice)
+
+    return assignments
+
+
+def deviation_2(
     config,
     nets,
     fleet,
@@ -485,7 +739,6 @@ def evaluate_2(
     service_policy = rule.validate_service_policy(service_policy)
     acc = rule.init_mode_accumulator()
     baseline_result = baseline["result"]
-    assignments = list(baseline["assignments"])
     fixed_metrics = baseline["fixed_metrics"]
     if not bool(baseline_result["feasible"]):
         return rule.finalize_nonbaseline_mode(
@@ -498,8 +751,17 @@ def evaluate_2(
             feasibility_reason="mode1_baseline_infeasible",
         )
 
+    assignments = _build_mode2_assignments(
+        config,
+        fleet,
+        network_context,
+        requests,
+        baseline["loops"],
+        baseline["weighted_contexts"],
+    )
+
     assignments_by_trip: defaultdict[
-        tuple[str, int, int],
+        Mode2TripKey,
         list[dict[str, Any]],
     ] = defaultdict(list)
     for assignment in assignments:
@@ -507,18 +769,15 @@ def evaluate_2(
 
     final_assignments: list[dict[str, Any]] = []
     final_trip_events: dict[
-        tuple[str, int, int],
-        dict[tuple[tuple[str, int, int], int, GridNode, int], Mode2DeviationEvent],
+        Mode2TripKey,
+        dict[Mode2EventKey, Mode2DeviationEvent],
     ] = {}
     accepted_detour_distance = 0.0
     accepted_extra_operating_time = 0.0
 
     for trip_key in sorted(assignments_by_trip):
         current_trip_assignments = _copy_trip_assignments(assignments_by_trip[trip_key])
-        current_trip_events: dict[
-            tuple[tuple[str, int, int], int, GridNode, int],
-            Mode2DeviationEvent,
-        ] = {}
+        current_trip_events: dict[Mode2EventKey, Mode2DeviationEvent] = {}
         current_trip_metrics = _simulate_trip_with_events(
             current_trip_assignments,
             current_trip_events,
@@ -597,7 +856,7 @@ def evaluate_2(
                 and int(option["direction"]) != 0
             ]
 
-            proposals: list[dict[str, dict[str, float | int]]] = []
+            proposals: list[dict[str, dict[str, Any]]] = []
             proposals.extend({"origin": option} for option in origin_options)
             proposals.extend({"destination": option} for option in destination_options)
             proposals.extend(
@@ -659,12 +918,12 @@ def evaluate_2(
                     + candidate_extra_operating_time,
                     _mode2_physical_event_count(candidate_events),
                 )
-                if (
-                    benchmark_expenditure is not None
-                    and candidate_net_expenditure
-                    > float(benchmark_expenditure) + 1e-9
-                ):
-                    continue
+                # if (
+                #     benchmark_expenditure is not None
+                #     and candidate_net_expenditure
+                #     > float(benchmark_expenditure) + 1e-9
+                # ):
+                #     continue
 
                 candidates.append(
                     {
@@ -720,10 +979,11 @@ def evaluate_2(
         acc.accepted_deviations,
     )
 
-    within_budget = (
-        benchmark_expenditure is None
-        or acc.net_expenditure <= float(benchmark_expenditure) + 1e-9
-    )
+    within_budget = True
+    # (
+    #     benchmark_expenditure is None
+    #     or acc.net_expenditure <= float(benchmark_expenditure) + 1e-9
+    # )
     return rule.finalize_nonbaseline_mode(
         mode_id=2,
         scenario=scenario,
